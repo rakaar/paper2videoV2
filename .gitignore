@@ -1,0 +1,16 @@
+.env
+.venv/
+
+# Python bytecode/cache
+__pycache__/
+*.py[cod]
+
+# Temporary files
+tmp/
+*.log
+
+# Binary index artifacts (regenerate locally or use LFS)
+index/*.faiss
+
+# OS/editor noise
+.DS_Store

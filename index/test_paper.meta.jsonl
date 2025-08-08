@@ -1,0 +1,6 @@
+{"id": "test_paper:p1:c1", "paper_id": "test_paper", "page": 1, "chunk_index": 1, "text_len": 5275}
+{"id": "test_paper:p1:c2", "paper_id": "test_paper", "page": 1, "chunk_index": 2, "text_len": 1945}
+{"id": "test_paper:p2:c1", "paper_id": "test_paper", "page": 2, "chunk_index": 1, "text_len": 5521}
+{"id": "test_paper:p2:c2", "paper_id": "test_paper", "page": 2, "chunk_index": 2, "text_len": 1242}
+{"id": "test_paper:p3:c1", "paper_id": "test_paper", "page": 3, "chunk_index": 1, "text_len": 5076}
+{"id": "test_paper:p3:c2", "paper_id": "test_paper", "page": 3, "chunk_index": 2, "text_len": 2269}

@@ -1,0 +1,8 @@
+mistralai
+python-dotenv
+tqdm
+tenacity
+openai
+faiss-cpu
+sentence-transformers
+numpy

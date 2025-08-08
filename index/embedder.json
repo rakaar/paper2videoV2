@@ -1,0 +1,9 @@
+{
+  "model": "BAAI/bge-small-en-v1.5",
+  "dim": 384,
+  "normalize": true,
+  "metric": "ip",
+  "chunk_size": 800,
+  "overlap": 100,
+  "tokenizer": "word-approx"
+}
