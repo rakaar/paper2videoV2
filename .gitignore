@@ -19,5 +19,5 @@ index/*.faiss
 *.jpeg
 *.pdf
 *.json
-
+*.jsonl
 *.txt
