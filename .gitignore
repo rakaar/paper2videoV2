@@ -14,3 +14,10 @@ index/*.faiss
 
 # OS/editor noise
 .DS_Store
+*.md
+!README.md
+*.jpeg
+*.pdf
+*.json
+
+*.txt
