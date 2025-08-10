@@ -143,6 +143,19 @@ async def main_async(args: argparse.Namespace):
             "Your task is to generate the content for a single slide, ensuring it flows logically from the previous slide and sets the stage for the next one. "
             "The output must be a single, clean JSON object."
         )
+        
+        # Add special instruction when figures are present
+        figure_instruction = ""
+        if current_figures:
+            figure_instruction = (
+                "**Special Instruction for Slides with Figures:**\n"
+                "This slide includes figures. To ensure proper display:\n"
+                "- Keep the `Content` section concise with minimal bullet points (2-4 key points maximum)\n"
+                "- Focus the `Content` on high-level observations about the figures\n"
+                "- Put detailed technical explanations in the `Audio` narration instead\n"
+                "- Refer to figures by their ID (e.g., 'Figure 1') in both `Content` and `Audio`\n\n"
+            )
+        
         user_prompt = f'''You are creating a presentation slide. Here is the plan and the relevant information:
 
 **Current Slide Plan:**
@@ -150,7 +163,7 @@ async def main_async(args: argparse.Namespace):
 {json.dumps(slide_group, indent=2)}
 ```
 
-**Next Slide\'s Plan (for context):**
+**Next Slide's Plan (for context):**
 ```json
 {json.dumps(next_slide_group, indent=2) if next_slide_group else '(This is the final slide)'}
 ```
@@ -158,7 +171,7 @@ async def main_async(args: argparse.Namespace):
 **Figures for this Slide:**
 {figures_text}
 
-**Full Text for this Slide:**
+{figure_instruction}**Full Text for this Slide:**
 ---
 {current_context}
 ---
@@ -170,7 +183,7 @@ async def main_async(args: argparse.Namespace):
 Generate the JSON for this slide with great technical detail, suitable for a knowledgeable audience.
 - The `Content` should be concise, technically deep, and use bullet points.
 - The `Audio` narration should be a clear, technically accurate script that explains the concepts in detail. It should flow logically from the previous slide and smoothly transition to the topic of the next slide.
-- **Crucially, you must refer to the figures by their ID (e.g., \'Figure 1\') in both the `Content` and `Audio` where they are relevant to the plan.**
+- **Crucially, you must refer to the figures by their ID (e.g., 'Figure 1') in both the `Content` and `Audio` where they are relevant to the plan.**
 - The `Figures` key in the output must contain the full, unmodified JSON objects for the figures provided above.
 
 **Output Format:**

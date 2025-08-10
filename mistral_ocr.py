@@ -70,7 +70,7 @@ def run(pdf_path: Path, out_root: Path, page_ranges=None):
 
             img_bytes = base64.b64decode(img_b64)
 
-            img_filename = f"{pdf_path.stem}_page_{p.index + 1:02d}_{img_id}"
+            img_filename = f"{img_id}"
             img_path = img_dir / img_filename
             with open(img_path, "wb") as out_f:
                 out_f.write(img_bytes)
