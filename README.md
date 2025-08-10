@@ -12,7 +12,7 @@ This is a powerful Python script designed to process academic papers in Markdown
 *   **Robust Summarization ("Reliable Recipe")**: Implements a sophisticated two-step process to generate high-quality, long-form summaries, even with models that tend to be overly concise:
     1.  **Gist Generation**: First, it generates a detailed, ~400-word summary (the "gist") for a text chunk, with an automatic retry mechanism if the initial summary is too short.
     2.  **Structured Data Extraction**: It then uses the generated gist to extract structured data—such as key claims, figure references, and equations—into a clean JSON object. This step is isolated from the original text to ensure the model focuses only on extraction.
-*   **Strict Verification**: The script programmatically asserts that the model has copied the long-form gist exactly into the final JSON, preventing the model from "helpfully" shortening it.
+*   **Validation**: Ensures the long-form gist is preserved in the final JSON; tolerates minor formatting differences by normalizing whitespace and replacing with the provided gist when needed. Accepts flexible figure references and coerces fields to the correct types.
 *   **Model Flexibility**: Supports any model available through the OpenRouter API, allowing users to balance cost, speed, and quality by specifying a model at runtime.
 *   **Structured Output**: Produces a `chunk_summaries.jsonl` file containing one JSON object per chunk, with fields like `id`, `page`, `gist`, `claims`, `figs`, `eqs`, `key_terms`, and `anchors`.
 
@@ -43,9 +43,17 @@ python summarize_chunks.py --pages-dir <path_to_markdown_files> [OPTIONS]
 *   `--pages-dir`: The path to the directory containing the page-wise markdown files (e.g., `page_001.md`, `page_002.md`).
 
 **Common Options:**
-*   `--model`: Specify a model slug from OpenRouter (e.g., `openai/gpt-4o`, `anthropic/claude-3-sonnet-20240229`).
 *   `--force`: Force re-summarization of all chunks, even if a summary file already exists.
 *   `--verbose`: Enable verbose logging to see detailed progress and potential warnings.
+*   `--chunk-size`: Chunk size in tokens (default: 1024)
+*   `--overlap`: Token overlap between chunks (default: 128)
+
+**Model Selection:**
+- Set via environment variable `OPENROUTER_SUMMARIZE_MODEL` (default: `anthropic/claude-3-haiku`). Example:
+  ```bash
+  OPENROUTER_SUMMARIZE_MODEL=openai/gpt-4o-mini \
+  python summarize_chunks.py --pages-dir mistral_responses/test_paper/markdown --outdir artifacts/test_paper
+  ```
 
 ## Slide Planner: `plan_slides.py`
 
@@ -59,6 +67,7 @@ Plans a sequence of slide sections (titles, scope, references, figures) from the
 - **Env:**
   - `OPENROUTER_API_KEY` must be set in `.env`
   - Optional `OPENROUTER_PLANNER_MODEL` (default: `deepseek/deepseek-chat`)
+- **Model Override:** pass `--model` to override the default/env model.
 - **Usage:**
   ```bash
   source .venv/bin/activate
@@ -80,6 +89,7 @@ Generates per-slide content JSON (Title, Content bullets, Audio narration, Figur
 - **Env:**
   - `OPENROUTER_API_KEY` must be set in `.env`
   - Optional `OPENROUTER_GENERATOR_MODEL` (default: `openai/gpt-4o`)
+- **Model Override:** pass `--model` to override the default/env model.
 - **Usage (Option A: keep outputs isolated per paper):**
   ```bash
   source .venv/bin/activate
