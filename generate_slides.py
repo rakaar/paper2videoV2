@@ -58,8 +58,7 @@ def parse_args() -> argparse.Namespace:
 
 # --- Main Logic ---
 
-async def main():
-    args = parse_args()
+async def main_async(args: argparse.Namespace):
     load_dotenv()
 
     api_key = os.environ.get("OPENROUTER_API_KEY")
@@ -221,5 +220,10 @@ Return a single JSON object with the following keys. Do not add any other text o
 
     print(f"\nSlide generation complete. Final presentation saved to {output_path}")
 
+def main_cli():
+    args = parse_args()
+    asyncio.run(main_async(args))
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main_cli()
+

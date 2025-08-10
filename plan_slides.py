@@ -120,8 +120,7 @@ If you believe the presentation is complete and all key topics have been covered
 
 # --- Main Logic ---
 
-async def main():
-    args = parse_args()
+async def main_async(args: argparse.Namespace):
     load_dotenv()
 
     api_key = os.environ.get("OPENROUTER_API_KEY")
@@ -220,5 +219,10 @@ async def main():
     
     print(f"\nSuccessfully wrote final slide plan to {output_path}")
 
+def main_cli():
+    args = parse_args()
+    asyncio.run(main_async(args))
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main_cli()
+

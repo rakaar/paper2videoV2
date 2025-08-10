@@ -49,10 +49,15 @@ python summarize_chunks.py --pages-dir <path_to_markdown_files> [OPTIONS]
 *   `--overlap`: Token overlap between chunks (default: 128)
 
 **Model Selection:**
-- Set via environment variable `OPENROUTER_SUMMARIZE_MODEL` (default: `anthropic/claude-3-haiku`). Example:
+- Use the `--model` argument to specify an OpenRouter model slug.
+- Default: `openai/gpt-4o-mini`.
+- The model can also be set via the `OPENROUTER_SUMMARIZE_MODEL` or `OPENROUTER_MODEL` environment variables.
+- Example:
   ```bash
-  OPENROUTER_SUMMARIZE_MODEL=openai/gpt-4o-mini \
-  python summarize_chunks.py --pages-dir mistral_responses/test_paper/markdown --outdir artifacts/test_paper
+  python summarize_chunks.py \
+    --pages-dir mistral_responses/test_paper/markdown \
+    --outdir artifacts/test_paper \
+    --model anthropic/claude-3-sonnet-3.5
   ```
 
 ## Slide Planner: `plan_slides.py`
@@ -111,76 +116,50 @@ Generates per-slide content JSON (Title, Content bullets, Audio narration, Figur
     --verbose --force
   ```
 
-## End-to-end Quickstart (example: `test_paper`)
+## End-to-End Pipeline: `paper_to_video.py`
+
+This script orchestrates the full pipeline, running summarization, slide planning, and slide generation in a single command.
+
+### Prerequisites
+
+1.  **Activate Virtual Environment**: Before running the script, ensure you have activated your Python virtual environment.
+    ```bash
+    source .venv/bin/activate
+    ```
+
+2.  **API Keys**: Make sure you have a `.env` file in the project root containing your `OPENROUTER_API_KEY`. You can copy the `.env.example` file to create it.
+
+### Usage
+
+To run the entire pipeline for a paper, use the following command structure:
 
 ```bash
-# 1) Summarize page-wise Markdown into chunk summaries
-python summarize_chunks.py \
-  --pages-dir mistral_responses/test_paper/markdown \
-  --outdir artifacts/test_paper \
-  --verbose --force
-
-# 2) Plan slides from the summaries
-python plan_slides.py \
-  --summaries-dir artifacts/test_paper \
-  --outdir artifacts/test_paper \
-  --verbose --force
-
-# 3) Generate presentation JSON from the plan + source text
-python generate_slides.py \
-  --ocr-dir mistral_responses \
-  --pdf-name test_paper \
-  --artifacts-dir artifacts/test_paper \
-  --outdir artifacts \
-  --verbose --force
+python3 paper_to_video.py --pdf-name <paper_name> [OPTIONS]
 ```
 
-## Overview
-- Deterministic pipeline (OCR → Markdown → slides/audio/video) plus an agentic layer using OpenAI-style tools via OpenRouter.
+**Required Arguments:**
+*   `--pdf-name`: The base name of the paper (e.g., `test_paper`). This is used to find the OCR output files and to name the artifact directories.
 
-Prereqs
-- Python 3.11+ (tested on 3.12)
-- Virtualenv recommended
-- .env with keys (copy `.env.example`):
-  - MISTRAL_API_KEY=...
-  - OPENROUTER_API_KEY=...
+**Common Options:**
+*   `--force`: Force re-processing for all steps, overwriting any existing artifacts.
+*   `--verbose`: Enable detailed logging to monitor the script's progress.
+*   `--summarize-model`: The OpenRouter model to use for summarization (default: `openai/gpt-4o-mini`).
 
-Setup
-1) Create venv and install deps
-   - python -m venv .venv && . .venv/bin/activate
-   - python -m pip install -U pip
-   - python -m pip install -r requirements.txt
+### Example
 
-2) Optional: run OCR to (re)generate page-wise Markdown for a PDF
-   - python mistral_ocr.py --pdf test_paper.pdf --out mistral_responses/test_paper
-   - Output: markdown under mistral_responses/test_paper/markdown/ and figure crops under images/
+To run the pipeline for the `test_paper` example, which is included in the repository:
 
-Search Index (local, deterministic)
-1) Build FAISS index from page-wise Markdown
-   - python index/index_paper.py --paper-id test_paper \
-       --markdown-dir mistral_responses/test_paper/markdown --index-dir index
-   - Artifacts: index/test_paper.faiss, index/test_paper.meta.jsonl, index/embedder.json
+```bash
+# Ensure your venv is active and .env file is set up
+.venv/bin/python3 paper_to_video.py --pdf-name test_paper --verbose --force
+```
 
-2) Sanity check (no LLM)
-   - TMPDIR=./tmp python -c "from index.search_index import search_chunks; print(search_chunks('test_paper','sparsity expression',5))"
+This command will create all artifacts in the `artifacts/test_paper/` directory, culminating in the final `presentation.json`.
 
-Tool-Call Demos (OpenRouter)
-1) write_slide demo (forces one tool call)
-   - python demo_tool_call.py --seed 7
-   - Default model: z-ai/glm-4.5 (reasoning disabled). Use --autoselect-model or --model to override.
+---
 
-2) search demo (forces one tool call)
-   - TMPDIR=./tmp python demo_search_tool_call.py "sparsity expression" --k 5 --paper-id test_paper
+## Individual Scripts
 
-Notes & Tips
-- If temp writes are restricted (e.g., PyTorch/sentence-transformers complain), set TMPDIR=./tmp as shown.
-- If a model slug is rejected by the router, pass --model openai/gpt-4o-mini as a known tool-capable fallback.
-- Slides written by tools are stored in slides.json.
+For more granular control, you can still run each script individually.
 
-Repo Layout (key files)
-- index/index_paper.py: chunk markdown (≈800/100), embed (bge-small), build FAISS + meta
-- index/search_index.py: search_chunks() + handle_search() → chunk IDs only
-- demo_tool_call.py: single write_slide tool-call demo via OpenRouter
-- demo_search_tool_call.py: single search tool-call demo via OpenRouter
-- mistral_ocr.py: OCR → Markdown + figure crops for a PDF
-- mistral_responses/test_paper/...: sample OCR outputs used for indexing
+## Summarization Script: `summarize_chunks.py`

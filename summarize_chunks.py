@@ -520,15 +520,7 @@ async def main_async(args: argparse.Namespace):
         logging.info("All chunks are already summarized. Use --force to re-summarize.")
         return
     logging.info(f"Summarizing {len(tasks_to_run)} chunks...")
-    client = OpenRouterClient(
-        model=os.environ.get(
-            "OPENROUTER_MODEL",
-            os.environ.get(
-                "OPENROUTER_SUMMARIZE_MODEL",
-                os.environ.get("OPENROUTER_EXTRACTOR_MODEL", "openai/gpt-oss-120b"),
-            ),
-        )
-    )
+    client = OpenRouterClient(model=args.model)
     logging.info(f"Models: {client.models}")
     progress = tqdm(total=len(tasks_to_run), desc="Summarizing", unit="chunk")
     summaries = {}
@@ -564,6 +556,7 @@ async def main_async(args: argparse.Namespace):
         logging.error(f"Encountered {len(errors)} errors during summarization:")
         for chunk_id, error_msg in errors.items():
             logging.error(f"  - {chunk_id}: {error_msg}")
+        raise RuntimeError(f"Summarization failed for {len(errors)} chunks.")
     logging.info("Summarization complete.")
 
 def main_cli():
@@ -574,6 +567,19 @@ def main_cli():
     parser.add_argument("--overlap", type=int, default=128, help="Token overlap between chunks.")
     parser.add_argument("--force", action="store_true", help="Force re-summarization of all chunks.")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging.")
+    default_model = os.environ.get(
+        "OPENROUTER_MODEL",
+        os.environ.get(
+            "OPENROUTER_SUMMARIZE_MODEL",
+            os.environ.get("OPENROUTER_EXTRACTOR_MODEL", "openai/gpt-4o-mini"),
+        ),
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=default_model,
+        help="OpenRouter model slug for summarization.",
+    )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO if not args.verbose else logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
     asyncio.run(main_async(args))
