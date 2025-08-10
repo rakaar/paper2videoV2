@@ -5,7 +5,7 @@ This directory contains the generated artifacts for the test_paper.
 ## Contents
 
 - `pngs/` - Generated slide images in PNG format
-- `audio/` - Audio files for each slide (placeholder only, not yet generated)
+- `audio/` - Audio files for each slide in WAV format
 - `deck.md` - Marp-compatible markdown file used to generate the slides
 
 ## Process
@@ -19,6 +19,15 @@ python3 generate_slide_pngs.py \
   --paper-name test_paper
 ```
 
+The audio files were generated using the `generate_audio.py` script:
+
+```bash
+python3 generate_audio.py \
+  --presentation-file ../presentation.json \
+  --output-dir ./audio \
+  --paper-name test_paper
+```
+
 ## Notes
 
 - The images in the slides are properly referenced and should display correctly
@@ -26,6 +35,7 @@ python3 generate_slide_pngs.py \
 - The slide dimensions are 16:9 aspect ratio
 - Image paths have been corrected to properly reference the source images
 - Images are sized to fit within the slides with CSS styling to prevent cutoff
+- Audio files are in WAV format, generated using the Sarvam TTS API
 
 ## Script Information
 
@@ -41,3 +51,9 @@ The script handles various aspects of slide generation:
 - Correct referencing of image files
 - Mathematical expression rendering with KaTeX
 - Consistent styling across all slides
+
+The `generate_audio.py` script is responsible for converting the audio narration text in `presentation.json` into audio files using the Sarvam TTS API. It:
+1. Reads the presentation data from `presentation.json`
+2. Extracts the audio narration text for each slide
+3. Uses the Sarvam TTS API to convert text to speech
+4. Saves the generated audio files in WAV format
