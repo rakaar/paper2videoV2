@@ -47,7 +47,85 @@ python summarize_chunks.py --pages-dir <path_to_markdown_files> [OPTIONS]
 *   `--force`: Force re-summarization of all chunks, even if a summary file already exists.
 *   `--verbose`: Enable verbose logging to see detailed progress and potential warnings.
 
-Overview
+## Slide Planner: `plan_slides.py`
+
+Plans a sequence of slide sections (titles, scope, references, figures) from the chunk summaries.
+
+- **Inputs (from a single artifacts subdir):**
+  - `chunk_summaries.jsonl`
+  - `chunk_index.jsonl`
+- **Output:**
+  - `slide_plan.json`
+- **Env:**
+  - `OPENROUTER_API_KEY` must be set in `.env`
+  - Optional `OPENROUTER_PLANNER_MODEL` (default: `deepseek/deepseek-chat`)
+- **Usage:**
+  ```bash
+  source .venv/bin/activate
+  python plan_slides.py \
+    --summaries-dir artifacts/test_paper \
+    --outdir artifacts/test_paper \
+    --verbose --force
+  ```
+
+## Slide Generator: `generate_slides.py`
+
+Generates per-slide content JSON (Title, Content bullets, Audio narration, Figures) using the slide plan and source text.
+
+- **Inputs:**
+  - `--artifacts-dir` containing: `slide_plan.json`, `chunk_summaries.jsonl`, `chunk_index.jsonl`
+  - OCR Markdown under `--ocr-dir/<pdf-name>/markdown/*.md` (used to pull exact chunk text spans)
+- **Output:**
+  - `presentation.json`
+- **Env:**
+  - `OPENROUTER_API_KEY` must be set in `.env`
+  - Optional `OPENROUTER_GENERATOR_MODEL` (default: `openai/gpt-4o`)
+- **Usage (Option A: keep outputs isolated per paper):**
+  ```bash
+  source .venv/bin/activate
+  python generate_slides.py \
+    --ocr-dir mistral_responses \
+    --pdf-name test_paper \
+    --artifacts-dir artifacts/test_paper \
+    --outdir artifacts/test_paper \
+    --verbose --force
+  ```
+- **Usage (Option B: write to repo-level artifacts/presentation.json):**
+  ```bash
+  source .venv/bin/activate
+  python generate_slides.py \
+    --ocr-dir mistral_responses \
+    --pdf-name test_paper \
+    --artifacts-dir artifacts/test_paper \
+    --outdir artifacts \
+    --verbose --force
+  ```
+
+## End-to-end Quickstart (example: `test_paper`)
+
+```bash
+# 1) Summarize page-wise Markdown into chunk summaries
+python summarize_chunks.py \
+  --pages-dir mistral_responses/test_paper/markdown \
+  --outdir artifacts/test_paper \
+  --verbose --force
+
+# 2) Plan slides from the summaries
+python plan_slides.py \
+  --summaries-dir artifacts/test_paper \
+  --outdir artifacts/test_paper \
+  --verbose --force
+
+# 3) Generate presentation JSON from the plan + source text
+python generate_slides.py \
+  --ocr-dir mistral_responses \
+  --pdf-name test_paper \
+  --artifacts-dir artifacts/test_paper \
+  --outdir artifacts \
+  --verbose --force
+```
+
+## Overview
 - Deterministic pipeline (OCR → Markdown → slides/audio/video) plus an agentic layer using OpenAI-style tools via OpenRouter.
 
 Prereqs
