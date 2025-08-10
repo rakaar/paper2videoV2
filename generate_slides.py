@@ -112,8 +112,10 @@ async def main():
     # --- Main Generation Loop ---
     final_presentation = []
     used_chunk_ids = set()
+    slide_groups = slide_plan["slides"]
+    for i, slide_group in enumerate(tqdm(slide_groups, desc="Generating Slides")):
+        next_slide_group = slide_groups[i + 1] if i + 1 < len(slide_groups) else None
 
-    for i, slide_group in enumerate(tqdm(slide_plan["slides"], desc="Generating Slides")):
         # 1. Get full text and figures for current slide
         current_references = slide_group.get("references", [])
         current_figures = slide_group.get("figures", [])
@@ -137,15 +139,21 @@ async def main():
 
         # 3. Create prompt
         system_prompt = (
-            "You are an expert at creating educational presentations from academic papers. "
-            "Your task is to generate the content for a single slide based on a plan and the source text. "
+            "You are an expert at creating slides for a detailed technical presentation based on an academic paper. "
+            "Your audience is technically proficient and expects a thorough explanation. "
+            "Your task is to generate the content for a single slide, ensuring it flows logically from the previous slide and sets the stage for the next one. "
             "The output must be a single, clean JSON object."
         )
-        user_prompt = f"""You are creating a presentation slide. Here is the plan and the relevant information:
+        user_prompt = f'''You are creating a presentation slide. Here is the plan and the relevant information:
 
-**Slide Plan:**
+**Current Slide Plan:**
 ```json
 {json.dumps(slide_group, indent=2)}
+```
+
+**Next Slide\'s Plan (for context):**
+```json
+{json.dumps(next_slide_group, indent=2) if next_slide_group else '(This is the final slide)'}
 ```
 
 **Figures for this Slide:**
@@ -160,10 +168,10 @@ async def main():
 - {previous_context}
 
 **Your Task:**
-Generate the JSON for this slide.
-- The `Content` should be concise and use bullet points.
-- The `Audio` narration should be a clear, technically accurate script.
-- **Crucially, you must refer to the figures by their ID (e.g., 'Figure 1') in both the `Content` and `Audio` where they are relevant to the plan.**
+Generate the JSON for this slide with great technical detail, suitable for a knowledgeable audience.
+- The `Content` should be concise, technically deep, and use bullet points.
+- The `Audio` narration should be a clear, technically accurate script that explains the concepts in detail. It should flow logically from the previous slide and smoothly transition to the topic of the next slide.
+- **Crucially, you must refer to the figures by their ID (e.g., \'Figure 1\') in both the `Content` and `Audio` where they are relevant to the plan.**
 - The `Figures` key in the output must contain the full, unmodified JSON objects for the figures provided above.
 
 **Output Format:**
@@ -171,13 +179,11 @@ Return a single JSON object with the following keys. Do not add any other text o
 ```json
 {{
   "Title": "The title of the slide",
-  "Title": "The title of the slide",
   "Content": "- Bullet point 1\n- As shown in Figure 1, ...",
   "Audio": "The narration that accompanies this slide... It should also mention Figure 1.",
   "Figures": {json.dumps(current_figures, indent=2)}
 }}
-```
-"""
+```'''
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},

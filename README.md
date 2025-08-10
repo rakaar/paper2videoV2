@@ -57,13 +57,13 @@ python summarize_chunks.py --pages-dir <path_to_markdown_files> [OPTIONS]
 
 ## Slide Planner: `plan_slides.py`
 
-Plans a sequence of slide sections (titles, scope, references, figures) from the chunk summaries.
+Plans a sequence of slide sections from the chunk summaries. Instead of planning one slide at a time, it groups slides into logical sections, each with a title and a list of topics to be covered.
 
 - **Inputs (from a single artifacts subdir):**
   - `chunk_summaries.jsonl`
   - `chunk_index.jsonl`
 - **Output:**
-  - `slide_plan.json`
+  - `slide_plan.json`: Contains a list of slide sections, where each section has a `section_title`, a list of `slide_topics`, a detailed `plan`, and lists of `references` and `figures`.
 - **Env:**
   - `OPENROUTER_API_KEY` must be set in `.env`
   - Optional `OPENROUTER_PLANNER_MODEL` (default: `deepseek/deepseek-chat`)

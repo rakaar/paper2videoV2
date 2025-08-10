@@ -243,11 +243,30 @@ class OpenRouterClient:
                         response.raise_for_status()
                         data = response.json()
                         content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                        if not content:
+                        if use_json:
+                            # Ensure we actually received a JSON object; otherwise try next model
+                            def _try_parse(s: str) -> bool:
+                                try:
+                                    json.loads(s)
+                                    return True
+                                except Exception:
+                                    return False
+                            if content and _try_parse(content):
+                                return content, ""
+                            # Fallback: sometimes JSON is in tool_calls
                             tool_calls = data.get("choices", [{}])[0].get("message", {}).get("tool_calls", [])
                             if tool_calls and "function" in tool_calls[0] and "arguments" in tool_calls[0]["function"]:
-                                content = tool_calls[0]["function"]["arguments"]
-                        return content, ""
+                                args = tool_calls[0]["function"]["arguments"]
+                                if _try_parse(args):
+                                    return args, ""
+                            logging.warning(f"Model {model_to_try} did not return valid JSON. Trying next model...")
+                            continue
+                        else:
+                            if not content:
+                                tool_calls = data.get("choices", [{}])[0].get("message", {}).get("tool_calls", [])
+                                if tool_calls and "function" in tool_calls[0] and "arguments" in tool_calls[0]["function"]:
+                                    content = tool_calls[0]["function"]["arguments"]
+                            return content, ""
                     except httpx.HTTPStatusError as e:
                         try:
                             error_details = e.response.json()
@@ -269,7 +288,17 @@ class OpenRouterClient:
 # Summarization Prompts & Logic
 # -----------------------------
 
-GIST_PROMPT_TEMPLATE = """Please provide a concise, self-contained summary of the following text chunk from a research paper. The summary should be around 400 words and capture the key concepts, methods, and findings presented in the text. It will be used by another AI to build a presentation, so it must be clear and easy to understand.
+GIST_PROMPT_TEMPLATE = """Provide a comprehensive, self-contained summary of the following research-paper text chunk. Target 250–300 words. Include:
+- Objectives/problem and scope
+- Assumptions/background context
+- Dataset/inputs or setting
+- Methods/algorithms and key steps
+- Definitions/notation introduced
+- Important equations (keep LaTeX as-is)
+- Any figures/tables mentioned (IDs/captions if present)
+- Intermediate findings and main claims
+- Limitations/edge cases
+- Anchors: concepts linking to other sections
 
 ---
 {chunk_text}
@@ -277,7 +306,7 @@ GIST_PROMPT_TEMPLATE = """Please provide a concise, self-contained summary of th
 
 Your summary:"""
 
-GIST_REPROMPT_TEMPLATE = """The previous summary was too short ({word_count} words). Please try again, ensuring the summary is comprehensive and around 400 words, capturing all key details from the text provided below.
+GIST_REPROMPT_TEMPLATE = """Your previous summary was {word_count} words. Expand to 250–300 words and ensure it covers objectives, assumptions, inputs, methods/steps, definitions/notation, key equations (LaTeX), figure/table mentions, findings/claims, limitations, and anchors to other sections.
 
 ---
 {chunk_text}
@@ -285,7 +314,11 @@ GIST_REPROMPT_TEMPLATE = """The previous summary was too short ({word_count} wor
 
 Your summary:"""
 
-JSON_EXTRACTOR_PROMPT_TEMPLATE = """Analyze the provided text chunk summary and extract the following information into a single JSON object. The `gist` field must be an exact, verbatim copy of the summary. For `claims`, list the key assertions or findings. For `figs` and `eqs`, list the IDs of any figures or equations mentioned. For `key_terms`, list important technical terms. For `anchors`, list concepts that connect to other parts of the paper.
+JSON_EXTRACTOR_PROMPT_TEMPLATE = """Analyze the provided text chunk summary and return ONLY a single valid JSON object with the keys below. Do not include Markdown, code fences, comments, or any extra text.
+
+IMPORTANT: Set the value of the `gist` key to the literal string "<GIST>" exactly. Do NOT copy the summary text into the JSON. We will insert the exact gist ourselves programmatically.
+
+For `claims`, list the key assertions or findings. For `figs` and `eqs`, list any figure/equation references. For `key_terms`, list important technical terms. For `anchors`, list concepts that connect to other parts of the paper.
 
 Available Figures for Reference:
 {available_figures_json}
@@ -297,24 +330,23 @@ Summary:
 {gist}
 ---
 
-Your JSON output:
-```json
-{{
+Your JSON output (JSON only, no code fences, no prose):
+{
   "id": "{chunk_id}",
   "page": {page_no},
-  "gist": "{gist}",
+  "gist": "<GIST>",
   "claims": [
     "Claim 1...",
     "Claim 2..."
   ],
   "figs": [
-    {{"id": "Figure 2", "path": "images/path/to/fig2.jpg", "caption": "Caption of figure 2..."}}
+    {"id": "Figure 2", "path": "images/path/to/fig2.jpg", "caption": "Caption of figure 2..."}
   ],
   "eqs": ["Eq. 1"],
   "key_terms": ["Term 1", "Term 2"],
   "anchors": ["Concept 1", "Concept 2"]
-}}
-```"""
+}
+"""
 
 def validate_summary(chunk: ChunkMeta, summary: dict, provided_gist: str, allowed_figs: List[FigureInfo]) -> Tuple[Optional[SummaryResult], Optional[str]]:
     required_keys = {"id", "page", "gist", "claims", "figs", "eqs", "key_terms", "anchors"}
@@ -323,12 +355,8 @@ def validate_summary(chunk: ChunkMeta, summary: dict, provided_gist: str, allowe
     if summary.get("id") != chunk.id:
         return None, f"ID mismatch: expected {chunk.id}, got {summary.get('id')}"
 
-    # Allow minor formatting changes; replace with provided gist if different after normalization.
-    def _normalize(s: str) -> str:
-        return re.sub(r"\s+", " ", (s or "").strip())
-
-    if _normalize(summary.get("gist", "")) != _normalize(provided_gist):
-        logging.warning(f"{chunk.id}: Model modified gist; replacing with provided gist.")
+    # Always set gist from provided_gist to avoid JSON escaping issues or model alterations.
+    if summary.get("gist") != provided_gist:
         summary["gist"] = provided_gist
 
     validated_claims = [str(c) for c in summary.get("claims", []) if isinstance(c, str) and c]
@@ -397,20 +425,26 @@ def validate_summary(chunk: ChunkMeta, summary: dict, provided_gist: str, allowe
     )
 
 async def generate_gist_with_retry(client: OpenRouterClient, chunk_text: str, progress: tqdm) -> Tuple[Optional[str], Optional[str]]:
-    progress.set_description("Generating gist (1st attempt)")
+    progress.set_description("Generating gist (attempt 1)")
     prompt = GIST_PROMPT_TEMPLATE.format(chunk_text=chunk_text)
     gist, error = await client.chat(prompt, force_json=False)
     if error:
         return None, f"Gist generation failed: {error}"
-    word_count = len(gist.split())
-    if 0 < word_count < 350:
-        progress.set_description(f"Gist too short ({word_count} words), re-prompting")
+    min_words = int(os.environ.get("MIN_GIST_WORDS", "250"))
+    max_attempts = 3
+    attempt = 1
+    while True:
+        if not gist:
+            return None, "Gist generation returned no content"
+        word_count = len(gist.split())
+        if word_count >= min_words or attempt >= max_attempts:
+            break
+        attempt += 1
+        progress.set_description(f"Gist too short ({word_count} words), re-prompting (attempt {attempt})")
         re_prompt = GIST_REPROMPT_TEMPLATE.format(word_count=word_count, chunk_text=chunk_text)
         gist, error = await client.chat(re_prompt, force_json=False)
         if error:
             return None, f"Gist re-generation failed: {error}"
-    if not gist:
-        return None, "Gist generation returned no content"
     return gist, None
 
 async def summarize_from_gist(client: OpenRouterClient, chunk: ChunkMeta, provided_gist: str, allowed_figs: List[FigureInfo], progress: tqdm) -> Tuple[Optional[dict], Optional[str]]:
@@ -418,7 +452,12 @@ async def summarize_from_gist(client: OpenRouterClient, chunk: ChunkMeta, provid
         progress.set_description(f"Extracting JSON (attempt {attempt})")
         try:
             available_figures_json = json.dumps([asdict(f) for f in allowed_figs], indent=2)
-            prompt = JSON_EXTRACTOR_PROMPT_TEMPLATE.format(chunk_id=chunk.id, page_no=chunk.page, gist=provided_gist, available_figures_json=available_figures_json)
+            prompt = (
+                JSON_EXTRACTOR_PROMPT_TEMPLATE.replace("{chunk_id}", chunk.id)
+                .replace("{page_no}", str(chunk.page))
+                .replace("{gist}", provided_gist)
+                .replace("{available_figures_json}", available_figures_json)
+            )
             raw_content, error = await client.chat(prompt, force_json=True)
             if error:
                 return None, error
@@ -429,6 +468,7 @@ async def summarize_from_gist(client: OpenRouterClient, chunk: ChunkMeta, provid
                 logging.warning(f"Failed to extract JSON on attempt {attempt} for {chunk.id}")
                 await asyncio.sleep(1)
         except Exception as e:
+            logging.error(f"RAW CONTENT for {chunk.id}: {raw_content!r}")
             logging.error(f"Error during JSON extraction for {chunk.id}: {e}")
             return None, str(e)
     return None, "Failed to extract valid JSON after multiple attempts."
@@ -449,6 +489,11 @@ async def main_async(args: argparse.Namespace):
     load_dotenv()
     enc = tiktoken.get_encoding("cl100k_base")
     ensure_outdir(args.outdir)
+    try:
+        logging.info(f"Pages dir: {args.pages_dir.resolve()}")
+        logging.info(f"Outdir: {args.outdir.resolve()}")
+    except Exception:
+        pass
     pages = load_pages(args.pages_dir)
     if not pages:
         logging.error(f"No markdown pages found in {args.pages_dir}. Exiting.")
@@ -475,7 +520,16 @@ async def main_async(args: argparse.Namespace):
         logging.info("All chunks are already summarized. Use --force to re-summarize.")
         return
     logging.info(f"Summarizing {len(tasks_to_run)} chunks...")
-    client = OpenRouterClient(model=os.environ.get("OPENROUTER_SUMMARIZE_MODEL", "anthropic/claude-3-haiku"))
+    client = OpenRouterClient(
+        model=os.environ.get(
+            "OPENROUTER_MODEL",
+            os.environ.get(
+                "OPENROUTER_SUMMARIZE_MODEL",
+                os.environ.get("OPENROUTER_EXTRACTOR_MODEL", "openai/gpt-oss-120b"),
+            ),
+        )
+    )
+    logging.info(f"Models: {client.models}")
     progress = tqdm(total=len(tasks_to_run), desc="Summarizing", unit="chunk")
     summaries = {}
     errors = {}
@@ -489,9 +543,23 @@ async def main_async(args: argparse.Namespace):
                 errors[chunk_id] = error
             progress.update(1)
     progress.close()
-    with summaries_path.open("a", encoding="utf-8") as f:
-        for chunk_id, summary in summaries.items():
-            f.write(json.dumps(asdict(summary)) + "\n")
+    # Merge existing + new summaries and write deterministically in chunk order
+    final_map: Dict[str, Any] = {}
+    # Start with existing (unless forced we already avoided skipping, but keeping merge logic uniform)
+    for k, v in existing_summaries.items():
+        final_map[k] = v
+    # Overlay with newly generated (as dicts)
+    for chunk_id, summary in summaries.items():
+        final_map[chunk_id] = asdict(summary)
+    # Write full set in the order of all_chunks to keep file stable
+    written = 0
+    with summaries_path.open("w", encoding="utf-8") as f:
+        for chunk in all_chunks:
+            obj = final_map.get(chunk.id)
+            if obj:
+                f.write(json.dumps(obj) + "\n")
+                written += 1
+    logging.info(f"Wrote {written} summaries to {summaries_path} (mode='w')")
     if errors:
         logging.error(f"Encountered {len(errors)} errors during summarization:")
         for chunk_id, error_msg in errors.items():

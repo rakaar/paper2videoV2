@@ -12,15 +12,17 @@ from tqdm import tqdm
 # --- Data Structures ---
 
 class SlidePlanStep:
-    def __init__(self, data: Dict[str, Any]):
-        self.slide_titles: List[str] = data.get("slide_titles", [])
+    def __init__(self, data: Dict[str, Any], figures: List[Dict[str, str]]):
+        self.section_title: str = data.get("section_title", "")
+        self.slide_topics: List[str] = data.get("slide_topics", [])
         self.plan: str = data.get("plan", "")
         self.references: List[str] = data.get("references", [])
-        self.figures: List[Dict[str, str]] = data.get("figures", [])
+        self.figures: List[Dict[str, str]] = figures
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "slide_titles": self.slide_titles,
+            "section_title": self.section_title,
+            "slide_topics": self.slide_topics,
             "plan": self.plan,
             "references": self.references,
             "figures": self.figures,
@@ -69,31 +71,42 @@ def parse_args() -> argparse.Namespace:
 
 # --- Prompt Generation ---
 
-def create_planner_prompt(full_chunk_summaries: str, previous_slide_titles: List[str]) -> List[Dict[str, str]]:
+def create_planner_prompt(full_chunk_summaries: str, previous_section_titles: List[str], all_figures: List[Dict[str, str]]) -> List[Dict[str, str]]:
     system_prompt = (
-        "You are an expert presentation planner. Your task is to create a plan for the *next* one or two slides in a presentation, based on the full summary of a paper and the plan for the preceding slides. "
-        "You must decide what to cover next to create a logical flow. Your output must be a single JSON object."
+        "You are an expert presentation planner. Your task is to group the key ideas from a paper summary into logical sections for a slide presentation. "
+        "For each section, you will provide a title and a list of topics to be covered, each topic corresponding to a single slide. "
+        "Your output must be a single JSON object."
     )
 
-    previous_slide_titles_str = "- " + "\n- ".join(previous_slide_titles) if previous_slide_titles else "(No slides planned yet. Start with the introduction.)"
+    previous_section_titles_str = "- " + "\n- ".join(previous_section_titles) if previous_section_titles else "(No sections planned yet. Start with the introduction.)"
+    
+    figures_list_str = "\n".join([f"- {fig['id']}: {fig['caption']}" for fig in all_figures])
 
     user_prompt = f"""**Full Paper Summary:**
 {full_chunk_summaries}
 
-**Titles of Slides Already Planned:**
-{previous_slide_titles_str}
+**Available Figures:**
+{figures_list_str}
+
+**Titles of Sections Already Planned:**
+{previous_section_titles_str}
 
 **Instructions:**
-Based on the full summary and what has been planned so far, generate the plan for the next logical slide or two. The plan should have a clear purpose and cite the relevant source chunks. Avoid planning slides with titles that have already been used.
+Based on the full summary and what has been planned so far, generate the plan for the next logical section of the presentation. The plan should have a clear purpose and cite the relevant source chunks. Avoid planning sections with titles that have already been used. If a figure from the **Available Figures** list is relevant to the plan, include its ID in the `figure_ids` list.
 
 **Output Format:**
 Return a single JSON object with the following structure. Do not include any other text or markdown.
 ```json
 {{
-  "slide_titles": ["Title for the Next Slide"],
-  "plan": "A detailed plan for what this slide (or slides) will cover.",
+  "section_title": "Title for This Section (e.g., Introduction, Methodology)",
+  "slide_topics": [
+      "Topic for the first slide in this section.",
+      "Topic for the second slide in this section.",
+      "..."
+  ],
+  "plan": "A detailed plan for what this entire section will cover, explaining the flow from one slide topic to the next.",
   "references": ["p001_c001", "p001_c002"],
-  "figures": [{{"id": "Fig 1", "path": "path/to/figure.jpg", "caption": "A description of the figure."}}], // List relevant full figure objects from the summary
+  "figure_ids": ["Fig 1", "Image 2"],
   "finished": false
 }}
 ```
@@ -128,6 +141,15 @@ async def main():
 
     with open(summaries_path, "r") as f:
         summaries_list = [json.loads(line) for line in f]
+    
+    all_figures = []
+    figure_lookup = {}
+    for s in summaries_list:
+        for fig in s.get('figs', []):
+            if fig['id'] not in figure_lookup:
+                all_figures.append(fig)
+                figure_lookup[fig['id']] = fig
+
     # Create a richer summary text that includes figure captions
     summary_lines = []
     for s in summaries_list:
@@ -141,18 +163,18 @@ async def main():
 
     # --- Sequential Planning Loop ---
     all_slide_plans: List[SlidePlanStep] = []
-    planned_slide_titles: List[str] = []
+    planned_section_titles: List[str] = []
     finished = False
     max_steps = 10 # Safety break
 
     print(f"Starting sequential slide planning with {args.model}...")
     for i in range(max_steps):
         print(f"\n--- Planning Step {i+1}/{max_steps} ---")
-        messages = create_planner_prompt(full_summary_text, planned_slide_titles)
+        messages = create_planner_prompt(full_summary_text, planned_section_titles, all_figures)
 
         try:
             response = await client.create_chat_completion(
-                model=args.model, messages=messages, response_format={"type": "json_object"}
+                model=args.model, messages=messages
             )
             response_text = response["choices"][0]["message"]["content"]
 
@@ -161,14 +183,23 @@ async def main():
 
             if response_text.strip().startswith("```json"):
                 response_text = response_text.split("```json", 1)[1].rsplit("```", 1)[0].strip()
-            
+            response_text = response_text.replace("\\", "\\\\")
             response_data = json.loads(response_text)
 
             # --- Process Response ---
-            step_plan = SlidePlanStep(response_data)
+            figure_ids = response_data.get("figure_ids", [])
+            figures = [figure_lookup[fig_id] for fig_id in figure_ids if fig_id in figure_lookup]
+
+            step_plan = SlidePlanStep(response_data, figures)
             all_slide_plans.append(step_plan)
-            planned_slide_titles.extend(step_plan.slide_titles)
-            print(f"Planned slides: {', '.join(step_plan.slide_titles)}")
+            if step_plan.section_title:
+                planned_section_titles.append(step_plan.section_title)
+            print(f"Planned Section: {step_plan.section_title}")
+            if step_plan.slide_topics:
+                print("  - Slide Topics:")
+                for topic in step_plan.slide_topics:
+                    print(f"    - {topic}")
+
 
             finished = response_data.get("finished", False)
 
