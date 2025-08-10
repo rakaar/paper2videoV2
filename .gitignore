@@ -14,10 +14,16 @@ index/*.faiss
 
 # OS/editor noise
 .DS_Store
-*.md
-!README.md
-*.jpeg
+
+# Mistral response files (generated/processed files)
+mistral_responses/**/*.md
+mistral_responses/**/*.json
+mistral_responses/**/*.jpeg
+mistral_responses/**/*.pdf
+mistral_responses/**/*.jsonl
+mistral_responses/**/*.txt
+mistral_responses/**/*.png
+
+# Artifacts (generated files)
+artifacts/
 *.pdf
-*.json
-*.jsonl
-*.txt
