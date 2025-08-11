@@ -116,30 +116,7 @@ Generates per-slide content JSON (Title, Content bullets, Audio narration, Figur
     --verbose --force
   ```
 
-## Audio Generation: `generate_audio.py`
-
-Generates audio files from the presentation.json using the Sarvam TTS API. This script now handles texts longer than Sarvam's 1500-character limit by:
-
-1. Splitting the text into sentence-aware chunks (max 1400 characters each)
-2. Generating audio for each chunk separately
-3. Concatenating the audio chunks into a single WAV file per slide using ffmpeg
-
-- **Inputs:**
-  - `--presentation-file`: Path to the presentation.json file
-  - `--output-dir`: Directory to save the generated audio files
-  - `--paper-name`: Name of the paper (e.g., 'test_paper')
-- **Env:**
-  - `SARVAM_API_KEY` must be set in `.env`
-- **Dependencies:**
-  - `ffmpeg` must be installed and available in PATH
-- **Usage:**
-  ```bash
-  source .venv/bin/activate
-  python generate_audio.py \\
-    --presentation-file artifacts/test_paper/presentation.json \\
-    --output-dir artifacts/test_paper/audio \\
-    --paper-name test_paper
-  ```
+## Audio Generation: `generate_audio.py`\n\nGenerates audio files from the presentation.json using the Sarvam TTS API. This script now handles texts longer than Sarvam's 1500-character limit by:\n\n1. Splitting the text into sentence-aware chunks (max 1400 characters each)\n2. Generating audio for each chunk separately\n3. Concatenating the audio chunks into a single WAV file per slide using ffmpeg\n\n- **Inputs:**\n  - `--presentation-file`: Path to the presentation.json file\n  - `--output-dir`: Directory to save the generated audio files\n  - `--paper-name`: Name of the paper (e.g., 'test_paper')\n- **Env:**\n  - `SARVAM_API_KEY` must be set in `.env`\n- **Dependencies:**\n  - `ffmpeg` must be installed and available in PATH\n- **Usage:**\n  ```bash\n  source .venv/bin/activate\n  python generate_audio.py \\\n    --presentation-file artifacts/test_paper/presentation.json \\\n    --output-dir artifacts/test_paper/audio \\\n    --paper-name test_paper\n  ```\n\n### Known Issue with Slide 1 Audio Generation\n\nThere is currently an issue with the audio generation for slide 1 (and potentially other slides with long text). The sentence splitting logic that should split the 1661-character text into 12 sentences and then into 2 chunks is not working correctly in the script context, even though it works in isolation.\n\n**Files involved:**\n- `generate_audio.py` - Main script with chunking logic\n- `artifacts/test_paper/presentation.json` - Input file with slide content\n- `artifacts/test_paper/audio/slide_001.wav` - Output audio file (incorrectly generated)\n\n**Problem details:**\n- Slide 1 has 1661 characters, exceeding Sarvam's 1500-character limit\n- Should be split into 2 chunks: 1330 chars + 330 chars\n- But the regex `r'(?<=[.!?])\\s+'` is not splitting sentences correctly in script context\n- Results in 1 chunk of 1661 characters instead of 2 chunks\n- Audio is truncated to first part only\n\n**Investigation findings:**\n- Regex works correctly when tested in isolation (produces 12 sentences)\n- Same function fails in script context (produces 1 chunk)\n- Issue may be related to text encoding or environment differences\n\n**For detailed analysis, see:** `audio_issue_analysis.md`\n
 
 ## End-to-End Pipeline: `paper_to_video.py`
 
