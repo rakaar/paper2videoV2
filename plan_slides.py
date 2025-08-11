@@ -3,7 +3,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Set
 
 import httpx
 from dotenv import load_dotenv
@@ -16,6 +16,7 @@ class SlidePlanStep:
         self.section_title: str = data.get("section_title", "")
         self.slide_topics: List[str] = data.get("slide_topics", [])
         self.plan: str = data.get("plan", "")
+        self.learning_objective: str = data.get("learning_objective", "")
         self.references: List[str] = data.get("references", [])
         self.figures: List[Dict[str, str]] = figures
 
@@ -24,6 +25,7 @@ class SlidePlanStep:
             "section_title": self.section_title,
             "slide_topics": self.slide_topics,
             "plan": self.plan,
+            "learning_objective": self.learning_objective,
             "references": self.references,
             "figures": self.figures,
         }
@@ -60,10 +62,17 @@ def parse_args() -> argparse.Namespace:
         "--outdir", type=Path, default=Path("artifacts"),
         help="Output directory (default: artifacts)",
     )
-    default_model = os.environ.get("OPENROUTER_PLANNER_MODEL", "deepseek/deepseek-chat")
+    default_model = os.environ.get(
+        "OPENROUTER_PLANNER_MODEL",
+        "qwen/qwen-2.5-7b-instruct:free,mistralai/mixtral-8x7b-instruct",
+    )
     ap.add_argument(
         "--model", type=str, default=default_model,
         help="OpenRouter model slug for planning.",
+    )
+    ap.add_argument(
+        "--max-tokens", type=int, default=120,
+        help="Max tokens for planner responses (default: 120)",
     )
     ap.add_argument("--verbose", action="store_true", help="Verbose logging")
     ap.add_argument("--force", action="store_true", help="Force re-planning of slides")
@@ -71,46 +80,61 @@ def parse_args() -> argparse.Namespace:
 
 # --- Prompt Generation ---
 
-def create_planner_prompt(full_chunk_summaries: str, previous_section_titles: List[str], all_figures: List[Dict[str, str]]) -> List[Dict[str, str]]:
+def create_planner_prompt(
+    full_chunk_summaries: str,
+    previous_section_titles: List[str],
+    all_figures: List[Dict[str, str]],
+    paper_card: Dict[str, Any],
+    next_section_title: str,
+) -> List[Dict[str, str]]:
     system_prompt = (
-        "You are an expert presentation planner. Your task is to group the key ideas from a paper summary into logical sections for a slide presentation. "
-        "For each section, you will provide a title and a list of topics to be covered, each topic corresponding to a single slide. "
-        "Your output must be a single JSON object."
+        "You are an expert presentation planner. Use the provided Paper Card as governance to plan exactly ONE section at a time. "
+        "Follow the canonical section order strictly. Each section MUST cite evidence via references to source chunk IDs. "
+        "Return one JSON object only."
     )
 
-    previous_section_titles_str = "- " + "\n- ".join(previous_section_titles) if previous_section_titles else "(No sections planned yet. Start with the introduction.)"
-    
+    previous_section_titles_str = "- " + "\n- ".join(previous_section_titles) if previous_section_titles else "(None yet)"
     figures_list_str = "\n".join([f"- {fig['id']}: {fig['caption']}" for fig in all_figures])
 
-    user_prompt = f"""**Full Paper Summary:**
-{full_chunk_summaries}
+    user_prompt = f"""Paper Card (governance):
+TL;DR: {paper_card.get('tldr', '')}
+Contributions: {paper_card.get('contributions', [])}
+Method (one-liner): {paper_card.get('method_oneliner', '')}
+Key Results: {paper_card.get('key_results', [])}
+Limitations: {paper_card.get('limitations', [])}
+Section Order: {paper_card.get('section_order', [])}
 
-**Available Figures:**
+You MUST plan the section titled EXACTLY: "{next_section_title}".
+If the next section is "Overview" or "Introduction":
+- Include 2–3 slide topics covering: problem framing & stakes; contributions; and a roadmap of upcoming sections.
+
+Full Paper Summary with chunk IDs and figure mentions:
+---
+{full_chunk_summaries}
+---
+
+Available Figures:
 {figures_list_str}
 
-**Titles of Sections Already Planned:**
+Titles already planned:
 {previous_section_titles_str}
 
-**Instructions:**
-Based on the full summary and what has been planned so far, generate the plan for the next logical section of the presentation. The plan should have a clear purpose and cite the relevant source chunks. Avoid planning sections with titles that have already been used. If a figure from the **Available Figures** list is relevant to the plan, include its ID in the `figure_ids` list.
+Hard requirements:
+- `references`: at least 2 valid chunk IDs related to this section.
+- `figure_ids`: OPTIONAL; if present, choose ONLY from figures mentioned in the referenced chunks.
+- `learning_objective`: 1–2 sentence objective for this section.
+- `section_title` MUST be exactly "{next_section_title}".
 
-**Output Format:**
-Return a single JSON object with the following structure. Do not include any other text or markdown.
-```json
+Output one JSON object only (no markdown, no commentary):
 {{
-  "section_title": "Title for This Section (e.g., Introduction, Methodology)",
-  "slide_topics": [
-      "Topic for the first slide in this section.",
-      "Topic for the second slide in this section.",
-      "..."
-  ],
-  "plan": "A detailed plan for what this entire section will cover, explaining the flow from one slide topic to the next.",
+  "section_title": "{next_section_title}",
+  "slide_topics": ["Topic 1", "Topic 2"],
+  "plan": "Detailed plan for the section, explaining flow across slide topics.",
+  "learning_objective": "What the audience should learn (1–2 sentences).",
   "references": ["p001_c001", "p001_c002"],
-  "figure_ids": ["Fig 1", "Image 2"],
+  "figure_ids": ["Figure 1"],
   "finished": false
 }}
-```
-If you believe the presentation is complete and all key topics have been covered (introduction, methods, results, conclusion), set `"finished": true`.
 """
 
     return [
@@ -132,6 +156,7 @@ async def main_async(args: argparse.Namespace):
 
     # --- Load Inputs ---
     summaries_path = args.summaries_dir / "chunk_summaries.jsonl"
+    card_path = args.summaries_dir / "paper_card.json"
     output_path = args.outdir / "slide_plan.json"
 
     if output_path.exists() and not args.force:
@@ -140,11 +165,23 @@ async def main_async(args: argparse.Namespace):
 
     with open(summaries_path, "r") as f:
         summaries_list = [json.loads(line) for line in f]
+
+    # Load governance card
+    if not card_path.exists():
+        raise FileNotFoundError(f"Missing paper_card.json at {card_path}. Run make_paper_card.py first.")
+    with open(card_path, "r", encoding="utf-8") as f:
+        paper_card = json.load(f)
     
     all_figures = []
     figure_lookup = {}
+    per_chunk_figs: Dict[str, List[Dict[str, str]]] = {}
+    per_chunk_claims: Dict[str, Set[str]] = {}
     for s in summaries_list:
-        for fig in s.get('figs', []):
+        # Build figure list and per-chunk mappings
+        figs = s.get('figs', []) or []
+        per_chunk_figs[s.get('id')] = figs
+        per_chunk_claims[s.get('id')] = set(s.get('claims', []) or [])
+        for fig in figs:
             if fig['id'] not in figure_lookup:
                 all_figures.append(fig)
                 figure_lookup[fig['id']] = fig
@@ -164,30 +201,78 @@ async def main_async(args: argparse.Namespace):
     all_slide_plans: List[SlidePlanStep] = []
     planned_section_titles: List[str] = []
     finished = False
-    max_steps = 10 # Safety break
+    # Aim to cover the governance order; allow a few retries
+    desired_order: List[str] = paper_card.get("section_order", ["Overview", "Method", "Results", "Discussion", "Limitations", "Conclusion"]) or []
+    max_steps = len(desired_order) + 4  # Safety break
 
     print(f"Starting sequential slide planning with {args.model}...")
+    models_to_try = [m.strip() for m in str(args.model).split(",") if m.strip()]
     for i in range(max_steps):
         print(f"\n--- Planning Step {i+1}/{max_steps} ---")
-        messages = create_planner_prompt(full_summary_text, planned_section_titles, all_figures)
+        # Determine next required section title
+        next_section_candidates = [sec for sec in desired_order if sec not in planned_section_titles]
+        if not next_section_candidates:
+            print("All sections from governance order have been planned. Stopping.")
+            break
+        next_section_title = next_section_candidates[0]
+
+        messages = create_planner_prompt(
+            full_summary_text, planned_section_titles, all_figures, paper_card, next_section_title
+        )
 
         try:
-            response = await client.create_chat_completion(
-                model=args.model, messages=messages
-            )
-            response_text = response["choices"][0]["message"]["content"]
-
-            if args.verbose:
-                print(f"Raw response:\n{response_text}")
-
-            if response_text.strip().startswith("```json"):
-                response_text = response_text.split("```json", 1)[1].rsplit("```", 1)[0].strip()
-            response_text = response_text.replace("\\", "\\\\")
-            response_data = json.loads(response_text)
+            response_text = ""
+            last_err: Optional[Exception] = None
+            for model_to_try in models_to_try:
+                try:
+                    resp = await client.create_chat_completion(
+                        model=model_to_try,
+                        messages=messages,
+                        response_format={"type": "json_object"},
+                        temperature=0.2,
+                        max_tokens=args.max_tokens,
+                    )
+                    response_text = resp["choices"][0]["message"]["content"]
+                    if args.verbose:
+                        print(f"[{model_to_try}] Raw response:\n{response_text}")
+                    # Some models still wrap JSON
+                    if response_text.strip().startswith("```json"):
+                        response_text = response_text.split("```json", 1)[1].rsplit("```", 1)[0].strip()
+                    # Try to parse
+                    response_data = json.loads(response_text)
+                    break
+                except Exception as e:
+                    last_err = e
+                    if args.verbose:
+                        print(f"Model {model_to_try} failed: {e}")
+                    continue
+            else:
+                raise RuntimeError(f"All planner models failed. Last error: {last_err}")
 
             # --- Process Response ---
-            figure_ids = response_data.get("figure_ids", [])
-            figures = [figure_lookup[fig_id] for fig_id in figure_ids if fig_id in figure_lookup]
+            # Enforce exact section title
+            returned_title = (response_data.get("section_title", "") or "").strip()
+            if returned_title != next_section_title:
+                print(f"Planner returned unexpected section title '{returned_title}'. Expected '{next_section_title}'. Re-asking...")
+                continue
+
+            # Validate references
+            refs = [r for r in response_data.get("references", []) if isinstance(r, str) and r]
+            if len(refs) < 2:
+                print("Planner returned insufficient references (<2). Re-asking...")
+                continue
+
+            # Filter figure_ids to those present in referenced chunks
+            allowed_figs: Set[str] = set()
+            for ref in refs:
+                for f in per_chunk_figs.get(ref, []) or []:
+                    fid = f.get("id")
+                    if fid:
+                        allowed_figs.add(fid)
+            filtered_fig_ids = [fid for fid in (response_data.get("figure_ids", []) or []) if fid in allowed_figs]
+            response_data["figure_ids"] = filtered_fig_ids
+
+            figures = [figure_lookup[fid] for fid in filtered_fig_ids if fid in figure_lookup]
 
             step_plan = SlidePlanStep(response_data, figures)
             all_slide_plans.append(step_plan)
@@ -199,9 +284,7 @@ async def main_async(args: argparse.Namespace):
                 for topic in step_plan.slide_topics:
                     print(f"    - {topic}")
 
-
             finished = response_data.get("finished", False)
-
             if finished:
                 print("\nModel has indicated the plan is complete.")
                 break

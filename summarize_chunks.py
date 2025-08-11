@@ -288,7 +288,7 @@ class OpenRouterClient:
 # Summarization Prompts & Logic
 # -----------------------------
 
-GIST_PROMPT_TEMPLATE = """Provide a comprehensive, self-contained summary of the following research-paper text chunk. Target 250–300 words. Include:
+GIST_PROMPT_TEMPLATE = """Provide a concise, self-contained summary of the following research-paper text chunk. Target 120–180 tokens. Include:
 - Objectives/problem and scope
 - Assumptions/background context
 - Dataset/inputs or setting
@@ -306,7 +306,7 @@ GIST_PROMPT_TEMPLATE = """Provide a comprehensive, self-contained summary of the
 
 Your summary:"""
 
-GIST_REPROMPT_TEMPLATE = """Your previous summary was {word_count} words. Expand to 250–300 words and ensure it covers objectives, assumptions, inputs, methods/steps, definitions/notation, key equations (LaTeX), figure/table mentions, findings/claims, limitations, and anchors to other sections.
+GIST_REPROMPT_TEMPLATE = """Your previous summary was {word_count} words. Expand to approximately 120–180 tokens and ensure it covers objectives, assumptions, inputs, methods/steps, definitions/notation, key equations (LaTeX), figure/table mentions, findings/claims, limitations, and anchors to other sections.
 
 ---
 {chunk_text}
@@ -430,7 +430,8 @@ async def generate_gist_with_retry(client: OpenRouterClient, chunk_text: str, pr
     gist, error = await client.chat(prompt, force_json=False)
     if error:
         return None, f"Gist generation failed: {error}"
-    min_words = int(os.environ.get("MIN_GIST_WORDS", "250"))
+    # Keep summaries short to save cost; approximate tokens by words
+    min_words = int(os.environ.get("MIN_GIST_WORDS", "120"))
     max_attempts = 3
     attempt = 1
     while True:
@@ -520,7 +521,7 @@ async def main_async(args: argparse.Namespace):
         logging.info("All chunks are already summarized. Use --force to re-summarize.")
         return
     logging.info(f"Summarizing {len(tasks_to_run)} chunks...")
-    client = OpenRouterClient(model=args.model)
+    client = OpenRouterClient(model=args.model, max_tokens=args.max_tokens)
     logging.info(f"Models: {client.models}")
     progress = tqdm(total=len(tasks_to_run), desc="Summarizing", unit="chunk")
     summaries = {}
@@ -571,7 +572,10 @@ def main_cli():
         "OPENROUTER_MODEL",
         os.environ.get(
             "OPENROUTER_SUMMARIZE_MODEL",
-            os.environ.get("OPENROUTER_EXTRACTOR_MODEL", "openai/gpt-4o-mini"),
+            os.environ.get(
+                "OPENROUTER_EXTRACTOR_MODEL",
+                "meta-llama/llama-3.2-3b-instruct,google/gemma-2-9b-it:free",
+            ),
         ),
     )
     parser.add_argument(
@@ -579,6 +583,12 @@ def main_cli():
         type=str,
         default=default_model,
         help="OpenRouter model slug for summarization.",
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=180,
+        help="Max tokens for model responses (default: 180)",
     )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO if not args.verbose else logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
