@@ -116,52 +116,9 @@ Generates per-slide content JSON (Title, Content bullets, Audio narration, Figur
     --verbose --force
   ```
 
-## Audio Generation: `generate_audio.py`\n\nGenerates audio files from the presentation.json using the Sarvam TTS API. This script now handles texts longer than Sarvam's 1500-character limit by:\n\n1. Splitting the text into sentence-aware chunks (max 1400 characters each)\n2. Generating audio for each chunk separately\n3. Concatenating the audio chunks into a single WAV file per slide using ffmpeg\n\n- **Inputs:**\n  - `--presentation-file`: Path to the presentation.json file\n  - `--output-dir`: Directory to save the generated audio files\n  - `--paper-name`: Name of the paper (e.g., 'test_paper')\n- **Env:**\n  - `SARVAM_API_KEY` must be set in `.env`\n- **Dependencies:**\n  - `ffmpeg` must be installed and available in PATH\n- **Usage:**\n  ```bash\n  source .venv/bin/activate\n  python generate_audio.py \\\n    --presentation-file artifacts/test_paper/presentation.json \\\n    --output-dir artifacts/test_paper/audio \\\n    --paper-name test_paper\n  ```\n\n### Known Issue with Slide 1 Audio Generation\n\nThere is currently an issue with the audio generation for slide 1 (and potentially other slides with long text). The sentence splitting logic that should split the 1661-character text into 12 sentences and then into 2 chunks is not working correctly in the script context, even though it works in isolation.\n\n**Files involved:**\n- `generate_audio.py` - Main script with chunking logic\n- `artifacts/test_paper/presentation.json` - Input file with slide content\n- `artifacts/test_paper/audio/slide_001.wav` - Output audio file (incorrectly generated)\n\n**Problem details:**\n- Slide 1 has 1661 characters, exceeding Sarvam's 1500-character limit\n- Should be split into 2 chunks: 1330 chars + 330 chars\n- But the regex `r'(?<=[.!?])\\s+'` is not splitting sentences correctly in script context\n- Results in 1 chunk of 1661 characters instead of 2 chunks\n- Audio is truncated to first part only\n\n**Investigation findings:**\n- Regex works correctly when tested in isolation (produces 12 sentences)\n- Same function fails in script context (produces 1 chunk)\n- Issue may be related to text encoding or environment differences\n\n**For detailed analysis, see:** `audio_issue_analysis.md`\n
+## Audio Generation: `generate_audio.py`\n\nGenerates audio files from `presentation.json` using the Sarvam TTS API. This script includes a robust pipeline to handle texts that exceed the API's character limit:
 
-## End-to-End Pipeline: `paper_to_video.py`
+1.  **Sentence Splitting**: The script first splits the slide's narration text into individual sentences.
+2.  **Per-Sentence Audio Generation**: To work around potential API bugs with specific sentence combinations, each sentence is sent to the Sarvam API as a separate request to generate an audio chunk.
+3.  **Concatenation**: The individual audio chunks for each sentence are then seamlessly concatenated into a single, complete WAV file for the slide using `ffmpeg`.
 
-This script orchestrates the full pipeline, running summarization, slide planning, and slide generation in a single command.
-
-### Prerequisites
-
-1.  **Activate Virtual Environment**: Before running the script, ensure you have activated your Python virtual environment.
-    ```bash
-    source .venv/bin/activate
-    ```
-
-2.  **API Keys**: Make sure you have a `.env` file in the project root containing your `OPENROUTER_API_KEY`. You can copy the `.env.example` file to create it.
-
-### Usage
-
-To run the entire pipeline for a paper, use the following command structure:
-
-```bash
-python3 paper_to_video.py --pdf-name <paper_name> [OPTIONS]
-```
-
-**Required Arguments:**
-*   `--pdf-name`: The base name of the paper (e.g., `test_paper`). This is used to find the OCR output files and to name the artifact directories.
-
-**Common Options:**
-*   `--force`: Force re-processing for all steps, overwriting any existing artifacts.
-*   `--verbose`: Enable detailed logging to monitor the script's progress.
-*   `--summarize-model`: The OpenRouter model to use for summarization (default: `openai/gpt-4o-mini`).
-
-### Example
-
-To run the pipeline for the `test_paper` example, which is included in the repository:
-
-```bash
-# Ensure your venv is active and .env file is set up
-.venv/bin/python3 paper_to_video.py --pdf-name test_paper --verbose --force
-```
-
-This command will create all artifacts in the `artifacts/test_paper/` directory, culminating in the final `presentation.json`.
-
----
-
-## Individual Scripts
-
-For more granular control, you can still run each script individually.
-
-## Summarization Script: `summarize_chunks.py`
