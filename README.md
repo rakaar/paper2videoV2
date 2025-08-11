@@ -116,6 +116,31 @@ Generates per-slide content JSON (Title, Content bullets, Audio narration, Figur
     --verbose --force
   ```
 
+## Audio Generation: `generate_audio.py`
+
+Generates audio files from the presentation.json using the Sarvam TTS API. This script now handles texts longer than Sarvam's 1500-character limit by:
+
+1. Splitting the text into sentence-aware chunks (max 1400 characters each)
+2. Generating audio for each chunk separately
+3. Concatenating the audio chunks into a single WAV file per slide using ffmpeg
+
+- **Inputs:**
+  - `--presentation-file`: Path to the presentation.json file
+  - `--output-dir`: Directory to save the generated audio files
+  - `--paper-name`: Name of the paper (e.g., 'test_paper')
+- **Env:**
+  - `SARVAM_API_KEY` must be set in `.env`
+- **Dependencies:**
+  - `ffmpeg` must be installed and available in PATH
+- **Usage:**
+  ```bash
+  source .venv/bin/activate
+  python generate_audio.py \\
+    --presentation-file artifacts/test_paper/presentation.json \\
+    --output-dir artifacts/test_paper/audio \\
+    --paper-name test_paper
+  ```
+
 ## End-to-End Pipeline: `paper_to_video.py`
 
 This script orchestrates the full pipeline, running summarization, slide planning, and slide generation in a single command.
