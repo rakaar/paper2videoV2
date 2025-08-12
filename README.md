@@ -50,16 +50,15 @@ python summarize_chunks.py --pages-dir <path_to_markdown_files> [OPTIONS]
 
 **Model Selection:**
 - Use the `--model` argument to specify an OpenRouter model slug, or a comma-separated list for fallback.
-- Default: `meta-llama/llama-3.2-3b-instruct,google/gemma-2-9b-it:free`.
+- Default: `meta-llama/llama-3.2-3b-instruct,google/gemma-2-9b-it`.
 - The model can also be set via `OPENROUTER_SUMMARIZE_MODEL`, `OPENROUTER_EXTRACTOR_MODEL`, or `OPENROUTER_MODEL` environment variables.
-- Token cap: `--max-tokens` (default: 180) controls response cost.
+- Token cap: `--max-tokens` (default: unlimited; omit to uncap).
 - Example:
   ```bash
   python summarize_chunks.py \
     --pages-dir mistral_responses/test_paper/markdown \
     --outdir artifacts/test_paper \
-    --model meta-llama/llama-3.2-3b-instruct,google/gemma-2-9b-it:free \
-    --max-tokens 180
+    --model meta-llama/llama-3.2-3b-instruct,google/gemma-2-9b-it
   ```
 
 ## Slide Planner: `plan_slides.py`
@@ -75,9 +74,9 @@ Plans a sequence of slide sections from the chunk summaries. Instead of planning
   - `slide_plan.json`: A list of slide sections with fields `section_title`, `slide_topics`, `plan`, `learning_objective`, `references` (≥2 chunk IDs per section), and `figures` (filtered from referenced chunks only).
 - **Env:**
   - `OPENROUTER_API_KEY` must be set in `.env`
-  - Optional `OPENROUTER_PLANNER_MODEL` (default: `qwen/qwen-2.5-7b-instruct:free,mistralai/mixtral-8x7b-instruct`)
+  - Optional `OPENROUTER_PLANNER_MODEL` (default: `qwen/qwen-2.5-7b-instruct,mistralai/mixtral-8x7b-instruct`)
 - **Model Override:** pass `--model` to override the default/env model.
-- **Token Cap:** `--max-tokens` (default: 120)
+- **Token Cap:** `--max-tokens` (default: unlimited)
 - **Usage:**
   ```bash
   source .venv/bin/activate
@@ -106,7 +105,7 @@ Generates per-slide content JSON (Title, Content bullets, Audio narration, Figur
   - `OPENROUTER_API_KEY` must be set in `.env`
   - Optional `OPENROUTER_GENERATOR_MODEL` (default: `mistralai/mistral-small-24b-instruct-2501,meta-llama/llama-3.2-3b-instruct`)
 - **Model Override:** pass `--model` to override the default/env model.
-- **Token Cap:** `--max-tokens` (default: 360)
+- **Token Cap:** `--max-tokens` (default: unlimited)
 - **Figure Reuse:** `--figure-reuse-limit` (default: -1 for unlimited reuse across the deck)
 - **Usage (Option A: keep outputs isolated per paper):**
   ```bash
@@ -139,9 +138,9 @@ Notes:
 - Context discipline: only the last 2 slide summaries plus compact checkpoint notes are passed to the LLM to avoid drift.
 
 ### Model reliability (generator)
-- Works well: `mistralai/mistral-small-24b-instruct-2501` (consistent JSON with `response_format=json_object`).
+- Works well: `mistralai/mistral-small-24b-instruct-2501` (consistent JSON with `response_format={"type":"json_object"}`).
 - Caveats: `openai/gpt-oss-120b` sometimes returns empty content under JSON mode; the generator now falls back to non-JSON mode and repairs responses, but you may still prefer Mistral for reliability/cost.
-- Note: slugs with `:free` can 404 on some accounts. Prefer non-`:free` slugs or verify availability.
+- Note: slugs without `:free` suffix are recommended for reliability.
 
 ---
 
@@ -155,7 +154,7 @@ Creates a governance card (`paper_card.json`) from the earliest and latest chunk
   - `paper_card.json` with keys: `tldr`, `contributions`, `method_oneliner`, `key_results`, `limitations`, and `section_order` (canonical deck order)
 - **Env:**
   - `OPENROUTER_API_KEY` must be set in `.env`
-  - Optional `OPENROUTER_CARD_MODEL` (default: `mistralai/mistral-small-24b-instruct-2501:free,meta-llama/llama-3.2-3b-instruct`)
+  - Optional `OPENROUTER_CARD_MODEL` (default: `mistralai/mistral-small-24b-instruct-2501,meta-llama/llama-3.2-3b-instruct`)
 - **Usage:**
   ```bash
   source .venv/bin/activate
@@ -261,7 +260,6 @@ python generate_slides.py \
   --outdir artifacts/test_paper \
   --add-cover \
   --model mistralai/mistral-small-24b-instruct-2501 \
-  --max-tokens 600 \
   --force
 
 # 3) Render PNGs (no extra cover)
@@ -289,7 +287,7 @@ Tips:
 
 - **Generator (stable):** `mistralai/mistral-small-24b-instruct-2501`
   - Consistently returns valid JSON with `response_format={"type":"json_object"}`
-  - Use `--max-tokens 600` for longer slides
+  - Leave `--max-tokens` unset for uncapped output; set it only if you need to constrain cost
 - **Generator (budget/backup):** `meta-llama/llama-3.2-3b-instruct`
   - Lower cost; acceptable for drafts, though JSON reliability can vary
 - **Cover Extractor:** Same as generator by default; can override with `--cover-model` or `OPENROUTER_COVER_MODEL`
