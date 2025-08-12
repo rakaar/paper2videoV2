@@ -63,8 +63,8 @@ def parse_args() -> argparse.Namespace:
         help="OpenRouter model slug for generation.",
     )
     ap.add_argument(
-        "--max-tokens", type=int, default=360,
-        help="Max tokens for generator responses (default: 360)",
+        "--max-tokens", type=int, default=None,
+        help="Max tokens for generator responses. Omit to uncap (default: unlimited)",
     )
     ap.add_argument(
         "--figure-reuse-limit", type=int, default=-1,
@@ -172,7 +172,7 @@ async def main_async(args: argparse.Namespace):
                     },
                 ],
                 response_format={"type": "json_object"},
-                max_tokens=120,
+                max_tokens=None,
                 temperature=0.0,
             )
             choice = (response.get("choices") or [{}])[0]
@@ -290,22 +290,28 @@ async def main_async(args: argparse.Namespace):
         for ref in current_references:
             figs_from_refs.extend(per_chunk_fig_objs.get(ref, []))
 
-        # Respect planner suggestions only if also present in refs
-        suggested_ids = {f.get("id") for f in (slide_group.get("figures", []) or []) if isinstance(f, dict)}
+        # Respect planner intent for figures: if planner specified an empty list, attach none.
+        planner_figs = slide_group.get("figures")
+        suggested_ids = {f.get("id") for f in (planner_figs or []) if isinstance(f, dict)}
         current_figures: List[Dict[str, Any]] = []
         seen_fids: Set[str] = set()
-        for f in figs_from_refs:
-            fid = f.get("id")
-            if not fid or fid in seen_fids:
-                continue
-            if suggested_ids and fid not in suggested_ids:
-                continue
-            # Figure reuse policy: configurable; -1 means unlimited
-            if args.figure_reuse_limit >= 0 and figure_use_count.get(fid, 0) >= args.figure_reuse_limit:
-                continue
-            current_figures.append(f)
-            seen_fids.add(fid)
-            figure_use_count[fid] = figure_use_count.get(fid, 0) + 1
+        if planner_figs is not None and len(planner_figs) == 0:
+            # Planner explicitly chose no figures for this slide
+            current_figures = []
+        else:
+            for f in figs_from_refs:
+                fid = f.get("id")
+                if not fid or fid in seen_fids:
+                    continue
+                # If planner selected specific figures, restrict to that set
+                if planner_figs is not None and suggested_ids and fid not in suggested_ids:
+                    continue
+                # Figure reuse policy: configurable; -1 means unlimited
+                if args.figure_reuse_limit >= 0 and figure_use_count.get(fid, 0) >= args.figure_reuse_limit:
+                    continue
+                current_figures.append(f)
+                seen_fids.add(fid)
+                figure_use_count[fid] = figure_use_count.get(fid, 0) + 1
 
         current_context = "\n\n---\n\n".join(get_chunk_text(ref) for ref in current_references)
 
@@ -350,11 +356,12 @@ async def main_async(args: argparse.Namespace):
         if current_figures:
             figure_instruction = (
                 "**Special Instruction for Slides with Figures:**\n"
-                "This slide includes figures. To ensure proper display:\n"
-                "- Keep the `Content` section concise with minimal bullet points (2-4 key points maximum)\n"
-                "- Focus the `Content` on high-level observations about the figures\n"
-                "- Put detailed technical explanations in the `Audio` narration instead\n"
-                "- Refer to figures by their ID (e.g., 'Figure 1') in both `Content` and `Audio`\n\n"
+                "This slide includes figure candidates. Use them selectively:\n"
+                "- Keep the `Content` concise (2–4 bullets) and only mention a figure if it materially supports the slide objective.\n"
+                "- If a figure was already shown, mention it only when adding a genuinely new angle; otherwise omit it.\n"
+                "- Put detailed technical explanations in the `Audio` narration.\n"
+                "- When you do mention a figure, refer to it by its ID (e.g., 'Figure 1').\n"
+                "- Set `NewInsightAboutFigures` to true only if you add genuinely new insight.\n\n"
             )
         else:
             figure_instruction = (
@@ -396,7 +403,7 @@ async def main_async(args: argparse.Namespace):
 Generate the JSON for this slide with great technical detail, suitable for a knowledgeable audience.
 - The `Content` should be concise, technically deep, and use bullet points.
 - The `Audio` narration should be a clear, technically accurate script that explains the concepts in detail. It should flow logically from the previous slide and smoothly transition to the topic of the next slide.
-- **Crucially, you must refer to the figures by their ID (e.g., 'Figure 1') in both the `Content` and `Audio` where they are relevant to the plan.**
+- If and only if a figure materially supports the plan, mention it and refer to it by its ID (e.g., 'Figure 1'); otherwise, do not mention figures. 
 - Do NOT include the figure JSON in your output. Set `Figures` to an empty array []; the system will attach the full, unmodified figure objects automatically.
 - Avoid repeating content already covered unless a very brief recap is required to introduce a new result. Prefer NOVEL claims.
 
@@ -442,7 +449,7 @@ Return a single JSON object with the following keys. Do not add any other text o
                             messages=messages + extra_msg,
                             response_format={"type": "json_object"} if use_json_mode else None,
                             temperature=0.3,
-                            max_tokens=args.max_tokens + (60 if regen_note else 0),
+                            max_tokens=(args.max_tokens + (60 if regen_note else 0)) if args.max_tokens is not None else None,
                         )
                         # Defensive extraction of content
                         choice = (response.get("choices") or [{}])[0]

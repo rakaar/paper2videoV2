@@ -2,6 +2,7 @@
 import argparse
 import asyncio
 import json
+import re
 import os
 from pathlib import Path
 from typing import Dict, List, Any, Tuple, Optional
@@ -16,13 +17,17 @@ class OpenRouterClient:
         self.http_client = httpx.AsyncClient()
 
     async def create_chat_completion(self, model: str, messages: list, **kwargs) -> dict:
+        payload = {"model": model, "messages": messages}
+        for k, v in kwargs.items():
+            if v is not None:
+                payload[k] = v
         response = await self.http_client.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
             },
-            json={"model": model, "messages": messages, **kwargs},
+            json=payload,
             timeout=120,
         )
         response.raise_for_status()
@@ -43,7 +48,7 @@ def parse_args() -> argparse.Namespace:
         "OPENROUTER_CARD_MODEL",
         os.environ.get(
             "OPENROUTER_GENERATOR_MODEL",
-            "mistralai/mistral-small-24b-instruct-2501:free,meta-llama/llama-3.2-3b-instruct",
+            "mistralai/mistral-small-24b-instruct-2501,meta-llama/llama-3.2-3b-instruct",
         ),
     )
     ap.add_argument(
@@ -51,8 +56,8 @@ def parse_args() -> argparse.Namespace:
         help="OpenRouter model slug(s) for card generation (comma-separated for fallback)",
     )
     ap.add_argument(
-        "--max-tokens", type=int, default=200,
-        help="Max tokens for card JSON response (default: 200)",
+        "--max-tokens", type=int, default=None,
+        help="Max tokens for card JSON response. Omit to uncap (default: unlimited)",
     )
     ap.add_argument("--verbose", action="store_true", help="Verbose logging")
     ap.add_argument("--force", action="store_true", help="Overwrite existing paper_card.json if present")
@@ -138,6 +143,54 @@ Rules:
     ]
 
 
+# --- Robust JSON extraction/repair helpers ---
+def _strip_code_fences(s: str) -> str:
+    s = s.strip()
+    if s.startswith("```"):
+        # Remove ```json ... ``` or ``` ... ```
+        if s.startswith("```json"):
+            s = s.split("```json", 1)[1]
+        else:
+            s = s.split("```", 1)[1]
+        if "```" in s:
+            s = s.rsplit("```", 1)[0]
+    return s.strip()
+
+
+def _extract_between_braces(s: str) -> str:
+    # Take substring from first '{' to last '}'
+    start = s.find("{")
+    end = s.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return s[start : end + 1]
+    return s
+
+
+def _remove_trailing_commas(s: str) -> str:
+    # Remove trailing commas before } or ]
+    return re.sub(r",\s*([}\]])", r"\1", s)
+
+
+def _quote_unquoted_keys(s: str) -> str:
+    # Quote JSON object keys that look like identifiers
+    return re.sub(r"([\{,]\s*)([A-Za-z_][A-Za-z0-9_\-]*)\s*:", r'\1"\2":', s)
+
+
+def _try_parse_card(text: str) -> Optional[dict]:
+    candidates = []
+    base = _strip_code_fences(text)
+    candidates.append(base)
+    candidates.append(_extract_between_braces(base))
+    candidates.append(_remove_trailing_commas(candidates[-1]))
+    candidates.append(_quote_unquoted_keys(candidates[-1]))
+    for cand in candidates:
+        try:
+            return json.loads(cand)
+        except Exception:
+            continue
+    return None
+
+
 async def main_async(args: argparse.Namespace):
     load_dotenv()
 
@@ -177,16 +230,61 @@ async def main_async(args: argparse.Namespace):
                     messages=messages,
                     response_format={"type": "json_object"},
                     temperature=0.1,
-                    max_tokens=args.max_tokens,
+                    max_tokens=args.max_tokens if args.max_tokens is not None else None,
                 )
-                response_text = response["choices"][0]["message"]["content"]
-                if response_text.strip().startswith("```json"):
-                    response_text = response_text.split("```json", 1)[1].rsplit("```", 1)[0].strip()
-                card = json.loads(response_text)
+                msg = response.get("choices", [{}])[0].get("message", {})
+                response_text = msg.get("content", "") or ""
+                # Prefer tool_calls arguments if present and JSON-looking
+                tool_calls = msg.get("tool_calls", [])
+                if not response_text and tool_calls:
+                    args_str = tool_calls[0].get("function", {}).get("arguments", "")
+                    response_text = args_str or response_text
+                # Try robust parsing/repair
+                card = _try_parse_card(response_text)
+                if card is None and tool_calls:
+                    # Last-ditch: attempt parsing tool_call args directly
+                    card = _try_parse_card(tool_calls[0].get("function", {}).get("arguments", ""))
+                if card is None:
+                    raise ValueError("Model did not return valid JSON for Paper Card")
                 break
             except Exception as e:
                 last_err = e
                 continue
+        # Retry with explicit instruction if first pass failed
+        if card is None:
+            extra = [{
+                "role": "user",
+                "content": (
+                    "Your previous output was not strictly JSON. "
+                    "Return ONLY one valid JSON object with keys exactly: "
+                    "tldr, contributions, method_oneliner, key_results, limitations, section_order. "
+                    "No markdown fences or commentary."
+                ),
+            }]
+            for model_to_try in models_to_try:
+                try:
+                    response = await client.create_chat_completion(
+                        model=model_to_try,
+                        messages=messages + extra,
+                        response_format={"type": "json_object"},
+                        temperature=0.1,
+                        max_tokens=args.max_tokens if args.max_tokens is not None else None,
+                    )
+                    msg = response.get("choices", [{}])[0].get("message", {})
+                    response_text = msg.get("content", "") or ""
+                    tool_calls = msg.get("tool_calls", [])
+                    if not response_text and tool_calls:
+                        args_str = tool_calls[0].get("function", {}).get("arguments", "")
+                        response_text = args_str or response_text
+                    card = _try_parse_card(response_text)
+                    if card is None and tool_calls:
+                        card = _try_parse_card(tool_calls[0].get("function", {}).get("arguments", ""))
+                    if card is None:
+                        raise ValueError("Model did not return valid JSON for Paper Card on retry")
+                    break
+                except Exception as e:
+                    last_err = e
+                    continue
         else:
             raise RuntimeError(f"All card models failed. Last error: {last_err}")
     except Exception as e:

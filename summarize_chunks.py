@@ -214,7 +214,7 @@ def extract_json_object(text: str) -> Optional[dict]:
 # -----------------------------
 
 class OpenRouterClient:
-    def __init__(self, model: str, timeout: float = 60.0, force_json: bool = True, max_tokens: int = 4096):
+    def __init__(self, model: str, timeout: float = 60.0, force_json: bool = True, max_tokens: Optional[int] = None):
         key = os.environ.get("OPENROUTER_API_KEY")
         if not key:
             raise RuntimeError("Missing OPENROUTER_API_KEY in environment")
@@ -229,7 +229,9 @@ class OpenRouterClient:
         self.max_tokens = max_tokens
 
     async def chat(self, prompt: str, *, http_retries: int = 5, force_json: Optional[bool] = None) -> Tuple[str, str]:
-        payload = {"messages": [{"role": "user", "content": prompt}], "temperature": 0.0, "max_tokens": self.max_tokens}
+        payload = {"messages": [{"role": "user", "content": prompt}], "temperature": 0.0}
+        if self.max_tokens is not None:
+            payload["max_tokens"] = self.max_tokens
         use_json = self.force_json if force_json is None else force_json
         if use_json:
             payload["response_format"] = {"type": "json_object"}
@@ -295,7 +297,7 @@ GIST_PROMPT_TEMPLATE = """Provide a concise, self-contained summary of the follo
 - Methods/algorithms and key steps
 - Definitions/notation introduced
 - Important equations (keep LaTeX as-is)
-- Any figures/tables mentioned (IDs/captions if present)
+- Figures/tables ONLY if the chunk text explicitly references them with a caption or textual marker (e.g., "Figure/Fig./Table N"). Ignore generic or decorative images.
 - Intermediate findings and main claims
 - Limitations/edge cases
 - Anchors: concepts linking to other sections
@@ -320,15 +322,23 @@ IMPORTANT: Set the value of the `gist` key to the literal string "<GIST>" exactl
 
 For `claims`, list the key assertions or findings. For `figs` and `eqs`, list any figure/equation references. For `key_terms`, list important technical terms. For `anchors`, list concepts that connect to other parts of the paper.
 
-Available Figures for Reference:
+Available Figures (candidates for THIS CHUNK ONLY; do not guess beyond these):
 {available_figures_json}
 
 ---
 Chunk ID: {chunk_id}
 Page: {page_no}
-Summary:
+Summary (for high-level claims only):
 {gist}
+
+Chunk Text (SOURCE OF TRUTH for figure references; use this to detect explicit mentions such as "Fig.", "Figure", or "Table" with numbers):
+{chunk_text}
 ---
+
+Strict rules for `figs`:
+- Include a figure only if the CHUNK TEXT explicitly references it (e.g., "Figure 1", "Fig. 2", "Table 1", case-insensitive, with or without a trailing period). If uncertain, set `figs: []`.
+- Prefer scientific, numbered figures with descriptive captions. Avoid generic items such as logos or decorative images.
+- Ignore items whose captions look like filenames (contain .png/.jpg/.jpeg) or whose IDs look generic (e.g., start with "Image " without a descriptive caption).
 
 Your JSON output (JSON only, no code fences, no prose):
 {
@@ -349,15 +359,21 @@ Your JSON output (JSON only, no code fences, no prose):
 """
 
 def validate_summary(chunk: ChunkMeta, summary: dict, provided_gist: str, allowed_figs: List[FigureInfo]) -> Tuple[Optional[SummaryResult], Optional[str]]:
-    required_keys = {"id", "page", "gist", "claims", "figs", "eqs", "key_terms", "anchors"}
-    if not required_keys.issubset(summary.keys()):
-        return None, f"Missing keys: {required_keys - set(summary.keys())}"
-    if summary.get("id") != chunk.id:
-        return None, f"ID mismatch: expected {chunk.id}, got {summary.get('id')}"
-
+    # Be robust to partially missing keys from small models: default absent fields
+    summary = dict(summary or {})
+    # Force canonical identifiers regardless of model output
+    summary["id"] = chunk.id
+    summary["page"] = chunk.page
     # Always set gist from provided_gist to avoid JSON escaping issues or model alterations.
-    if summary.get("gist") != provided_gist:
-        summary["gist"] = provided_gist
+    summary["gist"] = provided_gist
+    # Normalize list fields
+    for key in ("claims", "eqs", "key_terms", "anchors"):
+        val = summary.get(key)
+        if not isinstance(val, list):
+            summary[key] = []
+    if not isinstance(summary.get("figs"), list):
+        summary["figs"] = []
+    # ID and page are fixed above; no mismatch check needed
 
     validated_claims = [str(c) for c in summary.get("claims", []) if isinstance(c, str) and c]
     validated_eqs = [str(e) for e in summary.get("eqs", []) if isinstance(e, str) and e]
@@ -367,11 +383,39 @@ def validate_summary(chunk: ChunkMeta, summary: dict, provided_gist: str, allowe
     allowed_by_path = {f.path: f for f in allowed_figs}
     allowed_by_id = {f.id: f for f in allowed_figs}
 
+    # Build a normalized lookup by (kind, number) e.g., ("fig", "1")
+    def _norm_kind_num(s: str) -> Optional[Tuple[str, str]]:
+        if not s:
+            return None
+        m = re.match(r"\s*(fig(?:\.|ure)?|image|table)\s*([0-9]+)\b", s, flags=re.IGNORECASE)
+        if not m:
+            return None
+        kind = m.group(1).lower()
+        if kind.startswith("fig"):
+            kind = "fig"
+        elif kind.startswith("image"):
+            kind = "image"
+        elif kind.startswith("table"):
+            kind = "table"
+        num = m.group(2)
+        return kind, num
+
+    allowed_by_norm: Dict[Tuple[str, str], FigureInfo] = {}
+    for f in allowed_figs:
+        key = _norm_kind_num(f.id)
+        if key and key not in allowed_by_norm:
+            allowed_by_norm[key] = f
+
     def _match_by_id(fid: str) -> Optional[FigureInfo]:
         fid = (fid or "").strip()
+        # Direct match
         if fid in allowed_by_id:
             return allowed_by_id[fid]
-        # Try swapping Figure/Image prefixes
+        # Normalize variant forms like Fig./Figure/Image/Table N
+        key = _norm_kind_num(fid)
+        if key and key in allowed_by_norm:
+            return allowed_by_norm[key]
+        # Try swapping Figure/Image prefixes when numeric part exists
         if fid.lower().startswith("figure "):
             alt = "Image " + fid.split(" ", 1)[1]
             return allowed_by_id.get(alt)
@@ -457,6 +501,7 @@ async def summarize_from_gist(client: OpenRouterClient, chunk: ChunkMeta, provid
                 JSON_EXTRACTOR_PROMPT_TEMPLATE.replace("{chunk_id}", chunk.id)
                 .replace("{page_no}", str(chunk.page))
                 .replace("{gist}", provided_gist)
+                .replace("{chunk_text}", chunk.text)
                 .replace("{available_figures_json}", available_figures_json)
             )
             raw_content, error = await client.chat(prompt, force_json=True)
@@ -504,6 +549,25 @@ async def main_async(args: argparse.Namespace):
     logging.info(f"Found {len(all_figures)} unique figures.")
     for fig in all_figures:
         logging.info(f"  - ID: {fig.id}, Path: {fig.path}, Caption: {fig.caption[:50]}...")
+
+    # Build mapping from page number -> figures detected on that page (using canonical IDs by path)
+    by_path: Dict[str, FigureInfo] = {f.path: f for f in all_figures}
+    page_to_figs: Dict[int, List[FigureInfo]] = {}
+    for page_no, page_path, text in pages:
+        seen_paths_on_page: Set[str] = set()
+        for match in IMAGE_RE.finditer(text):
+            alt_text = match.group(1)
+            relative_path = match.group(2)
+            try:
+                absolute_path = (page_path.parent / relative_path).resolve()
+                final_path = absolute_path.relative_to(args.pages_dir.parent)
+            except (ValueError, FileNotFoundError):
+                final_path = Path("images") / Path(relative_path).name
+            fp = str(final_path)
+            if fp in by_path and fp not in seen_paths_on_page:
+                page_to_figs.setdefault(page_no, []).append(by_path[fp])
+                seen_paths_on_page.add(fp)
+
     all_chunks = []
     for page_no, _path, text in pages:
         all_chunks.extend(chunk_page(enc, page_no, text, args.chunk_size, args.overlap))
@@ -527,7 +591,8 @@ async def main_async(args: argparse.Namespace):
     summaries = {}
     errors = {}
     async with asyncio.TaskGroup() as tg:
-        workers = [asyncio.create_task(summarize_one(i, client, chunk, all_figures, progress)) for i, chunk in enumerate(tasks_to_run)]
+        # Pass only page-local figure candidates to each chunk
+        workers = [asyncio.create_task(summarize_one(i, client, chunk, page_to_figs.get(chunk.page, []), progress)) for i, chunk in enumerate(tasks_to_run)]
         for task in asyncio.as_completed(workers):
             chunk_id, summary, error = await task
             if summary:
@@ -574,7 +639,7 @@ def main_cli():
             "OPENROUTER_SUMMARIZE_MODEL",
             os.environ.get(
                 "OPENROUTER_EXTRACTOR_MODEL",
-                "meta-llama/llama-3.2-3b-instruct,google/gemma-2-9b-it:free",
+                "meta-llama/llama-3.2-3b-instruct,google/gemma-2-9b-it",
             ),
         ),
     )
@@ -587,8 +652,8 @@ def main_cli():
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=180,
-        help="Max tokens for model responses (default: 180)",
+        default=None,
+        help="Max tokens for model responses. Omit to uncap (default: unlimited)",
     )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO if not args.verbose else logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')

@@ -89,7 +89,6 @@ def llm_extract_cover(ocr_dir: Path, paper_name: str, model: str, timeout: float
                     },
                 ],
                 "response_format": {"type": "json_object"},
-                "max_tokens": 120,
                 "temperature": 0.0,
             }
             resp = client.post(

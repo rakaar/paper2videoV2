@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Set
 
@@ -38,13 +39,17 @@ class OpenRouterClient:
         self.http_client = httpx.AsyncClient()
 
     async def create_chat_completion(self, model: str, messages: list, **kwargs) -> dict:
+        payload = {"model": model, "messages": messages}
+        for k, v in kwargs.items():
+            if v is not None:
+                payload[k] = v
         response = await self.http_client.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
             },
-            json={"model": model, "messages": messages, **kwargs},
+            json=payload,
             timeout=120,
         )
         response.raise_for_status()
@@ -64,15 +69,15 @@ def parse_args() -> argparse.Namespace:
     )
     default_model = os.environ.get(
         "OPENROUTER_PLANNER_MODEL",
-        "qwen/qwen-2.5-7b-instruct:free,mistralai/mixtral-8x7b-instruct",
+        "qwen/qwen-2.5-7b-instruct,mistralai/mixtral-8x7b-instruct",
     )
     ap.add_argument(
         "--model", type=str, default=default_model,
         help="OpenRouter model slug for planning.",
     )
     ap.add_argument(
-        "--max-tokens", type=int, default=120,
-        help="Max tokens for planner responses (default: 120)",
+        "--max-tokens", type=int, default=None,
+        help="Max tokens for planner responses. Omit to uncap (default: unlimited)",
     )
     ap.add_argument("--verbose", action="store_true", help="Verbose logging")
     ap.add_argument("--force", action="store_true", help="Force re-planning of slides")
@@ -113,7 +118,7 @@ Full Paper Summary with chunk IDs and figure mentions:
 {full_chunk_summaries}
 ---
 
-Available Figures:
+Available Figures (candidates; do not force use):
 {figures_list_str}
 
 Titles already planned:
@@ -121,7 +126,8 @@ Titles already planned:
 
 Hard requirements:
 - `references`: at least 2 valid chunk IDs related to this section.
-- `figure_ids`: OPTIONAL; if present, choose ONLY from figures mentioned in the referenced chunks.
+- `figure_ids`: REQUIRED but may be an empty array []. If using figures, choose ONLY from figures present in the referenced chunks, and select at most one central figure. Prefer numbered scientific figures (e.g., "Figure/Fig./Table N") with descriptive captions; avoid generic items like "Image N" or filename-like captions. If none clearly helps, set `figure_ids: []`.
+- Avoid reusing the same figure across neighboring sections unless adding a genuinely new insight.
 - `learning_objective`: 1–2 sentence objective for this section.
 - `section_title` MUST be exactly "{next_section_title}".
 
@@ -141,6 +147,55 @@ Output one JSON object only (no markdown, no commentary):
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
     ]
+
+# --- JSON Utilities ---
+
+def _strip_code_fences(text: str) -> str:
+    s = (text or "").strip()
+    if s.startswith("```"):
+        s = re.sub(r"^```(?:json)?\s*", "", s)
+        s = re.sub(r"\s*```$", "", s)
+    return s
+
+def _extract_between_braces(text: str) -> str:
+    s = _strip_code_fences(text)
+    start = s.find("{")
+    end = s.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return s[start : end + 1]
+    return s
+
+def _remove_trailing_commas(text: str) -> str:
+    return re.sub(r",(\s*[}\]])", r"\1", text)
+
+def _quote_unquoted_keys(text: str) -> str:
+    # Quote JSON object keys appearing after '{' or ',' as well as at line starts
+    return re.sub(r"([\{,]\s*)([A-Za-z_][A-Za-z0-9_\-]*)\s*:", r'\1"\2":', text)
+
+def _normalize_python_literals_to_json(text: str) -> str:
+    # Convert Python-style booleans/None to JSON equivalents
+    s = text
+    s = re.sub(r'(?<!["\w])True(?!["\w])', 'true', s)
+    s = re.sub(r'(?<!["\w])False(?!["\w])', 'false', s)
+    s = re.sub(r'(?<!["\w])None(?!["\w])', 'null', s)
+    return s
+
+def _try_parse_json_obj(text: str) -> Optional[Dict[str, Any]]:
+    candidates = []
+    base = _strip_code_fences(text)
+    candidates.append(base)
+    candidates.append(_extract_between_braces(base))
+    candidates.append(_remove_trailing_commas(candidates[-1]))
+    candidates.append(_quote_unquoted_keys(candidates[-1]))
+    candidates.append(_normalize_python_literals_to_json(candidates[-1]))
+    for cand in candidates:
+        try:
+            obj = json.loads(cand)
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            continue
+    return None
 
 # --- Main Logic ---
 
@@ -221,32 +276,80 @@ async def main_async(args: argparse.Namespace):
         )
 
         try:
-            response_text = ""
+            response_data: Optional[Dict[str, Any]] = None
             last_err: Optional[Exception] = None
             for model_to_try in models_to_try:
-                try:
-                    resp = await client.create_chat_completion(
-                        model=model_to_try,
-                        messages=messages,
-                        response_format={"type": "json_object"},
-                        temperature=0.2,
-                        max_tokens=args.max_tokens,
-                    )
-                    response_text = resp["choices"][0]["message"]["content"]
-                    if args.verbose:
-                        print(f"[{model_to_try}] Raw response:\n{response_text}")
-                    # Some models still wrap JSON
-                    if response_text.strip().startswith("```json"):
-                        response_text = response_text.split("```json", 1)[1].rsplit("```", 1)[0].strip()
-                    # Try to parse
-                    response_data = json.loads(response_text)
+                for use_json_mode in (True, False):
+                    try:
+                        resp = await client.create_chat_completion(
+                            model=model_to_try,
+                            messages=messages,
+                            response_format={"type": "json_object"} if use_json_mode else None,
+                            temperature=0.2,
+                            max_tokens=args.max_tokens if args.max_tokens is not None else None,
+                        )
+                        choice = (resp.get("choices") or [{}])[0]
+                        msg = choice.get("message") or {}
+                        response_text = msg.get("content") or ""
+                        tool_calls = msg.get("tool_calls") or []
+                        if args.verbose:
+                            print(f"[{model_to_try} | json_mode={use_json_mode}] Raw len={len(response_text)}")
+                        # Try content first
+                        response_data = _try_parse_json_obj(response_text)
+                        if response_data is None and tool_calls:
+                            args_str = tool_calls[0].get("function", {}).get("arguments", "")
+                            response_data = _try_parse_json_obj(args_str)
+                        if response_data is None:
+                            raise ValueError("Model did not return valid JSON for planning step")
+                        break
+                    except Exception as e:
+                        last_err = e
+                        response_data = None
+                        if args.verbose:
+                            print(f"Model {model_to_try} failed (json_mode={use_json_mode}): {e}")
+                        continue
+                if response_data is not None:
                     break
-                except Exception as e:
-                    last_err = e
-                    if args.verbose:
-                        print(f"Model {model_to_try} failed: {e}")
-                    continue
-            else:
+            # If first pass failed to produce JSON, try once more with an explicit instruction
+            if response_data is None:
+                extra_msg = [{"role": "user", "content": (
+                    "IMPORTANT: Your previous output was invalid or not strictly JSON. "
+                    "Return ONLY a single valid JSON object with keys exactly: "
+                    "section_title, slide_topics, plan, learning_objective, references, figure_ids, finished. "
+                    "Do not include markdown fences or any commentary."
+                )}]
+                for model_to_try in models_to_try:
+                    for use_json_mode in (True, False):
+                        try:
+                            resp = await client.create_chat_completion(
+                                model=model_to_try,
+                                messages=messages + extra_msg,
+                                response_format={"type": "json_object"} if use_json_mode else None,
+                                temperature=0.2,
+                                max_tokens=args.max_tokens if args.max_tokens is not None else None,
+                            )
+                            choice = (resp.get("choices") or [{}])[0]
+                            msg = choice.get("message") or {}
+                            response_text = msg.get("content") or ""
+                            tool_calls = msg.get("tool_calls") or []
+                            if args.verbose:
+                                print(f"[RETRY {model_to_try} | json_mode={use_json_mode}] Raw len={len(response_text)}")
+                            response_data = _try_parse_json_obj(response_text)
+                            if response_data is None and tool_calls:
+                                args_str = tool_calls[0].get("function", {}).get("arguments", "")
+                                response_data = _try_parse_json_obj(args_str)
+                            if response_data is None:
+                                raise ValueError("Model did not return valid JSON on retry for planning step")
+                            break
+                        except Exception as e:
+                            last_err = e
+                            response_data = None
+                            if args.verbose:
+                                print(f"Retry model {model_to_try} failed (json_mode={use_json_mode}): {e}")
+                            continue
+                    if response_data is not None:
+                        break
+            if response_data is None:
                 raise RuntimeError(f"All planner models failed. Last error: {last_err}")
 
             # --- Process Response ---
@@ -290,8 +393,8 @@ async def main_async(args: argparse.Namespace):
                 break
 
         except Exception as e:
-            print(f"An error occurred during planning step {i+1}: {e}")
-            break
+            print(f"An error occurred during planning step {i+1}: {e}. Will retry next iteration.")
+            continue
     else:
         print("\nReached maximum planning steps. Finishing.")
 
