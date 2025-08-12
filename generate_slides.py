@@ -230,7 +230,7 @@ async def main_async(args: argparse.Namespace):
         try:
             first_topic = (
                 slide_plan.get("slides")[0].get("section")
-                or (slide_plan.get("slides")[0].get("slide_titles") or [None])[0]
+                or (slide_plan.get("slides")[0].get("slide_topics") or [None])[0]
                 or "background"
             )
         except Exception:
@@ -276,13 +276,30 @@ async def main_async(args: argparse.Namespace):
         previous_slides.append({"Title": last.get("Title", ""), "Content": last.get("Content", "")})
         checkpoint_notes.append("Cover introduced")
     slide_groups = slide_plan["slides"]
-    for i, slide_group in enumerate(tqdm(slide_groups, desc="Generating Slides")):
-        next_slide_group = slide_groups[i + 1] if i + 1 < len(slide_groups) else None
+    # Flatten sections into per-topic work items so we generate 1 slide per topic
+    flat_items: List[Dict[str, Any]] = []
+    for si, group in enumerate(slide_groups):
+        topics = group.get("slide_topics") or []
+        # Fallback: if planner didn't provide topics, create a single whole-section slide
+        if not topics:
+            topics = [None]
+        for ti, topic in enumerate(topics):
+            flat_items.append({
+                "group": group,
+                "section_index": si,
+                "topic_index": ti,
+                "topic": topic,
+            })
+
+    for k, item in enumerate(tqdm(flat_items, desc="Generating Slides")):
+        slide_group = item["group"]
+        focused_topic = item["topic"]  # May be None when no topics were provided
+        next_item = flat_items[k + 1] if k + 1 < len(flat_items) else None
 
         # 1. Get references and full text for current slide
         current_references = slide_group.get("references", [])
         if not current_references:
-            print(f"Warning: slide group {i+1} has no references; skipping generation for this group.")
+            print(f"Warning: slide group {k+1} has no references; skipping generation for this group.")
             continue
 
         # Compose candidate figures from references (source of truth)
@@ -369,6 +386,17 @@ async def main_async(args: argparse.Namespace):
                 "Do not mention or reference any figures in `Content` or `Audio` for this slide.\n\n"
             )
         
+        # Build a compact next-slide focus context (topic + section) for smoother bridges
+        if next_item:
+            next_slide_focus = {
+                "section_title": next_item["group"].get("section_title"),
+                "topic": next_item["topic"],
+                "learning_objective": next_item["group"].get("learning_objective", ""),
+            }
+            next_slide_focus_json = json.dumps(next_slide_focus, indent=2)
+        else:
+            next_slide_focus_json = '(This is the final slide)'
+
         user_prompt = f'''You are creating a presentation slide. Here is the plan and the relevant information:
 
 **Current Slide Plan:**
@@ -376,9 +404,12 @@ async def main_async(args: argparse.Namespace):
 {json.dumps(slide_group, indent=2)}
 ```
 
-**Next Slide's Plan (for context):**
+**Focused Topic for this Slide:**
+{focused_topic or '(whole section)'}
+
+**Next Slide's Focus (for context):**
 ```json
-{json.dumps(next_slide_group, indent=2) if next_slide_group else '(This is the final slide)'}
+{next_slide_focus_json}
 ```
 
 **Figures for this Slide:**
@@ -401,6 +432,7 @@ async def main_async(args: argparse.Namespace):
 
 **Your Task:**
 Generate the JSON for this slide with great technical detail, suitable for a knowledgeable audience.
+- Focus exclusively on the item in "Focused Topic for this Slide"; treat other topics from the section as separate slides.
 - The `Content` should be concise, technically deep, and use bullet points.
 - The `Audio` narration should be a clear, technically accurate script that explains the concepts in detail. It should flow logically from the previous slide and smoothly transition to the topic of the next slide.
 - If and only if a figure materially supports the plan, mention it and refer to it by its ID (e.g., 'Figure 1'); otherwise, do not mention figures. 
@@ -427,7 +459,7 @@ Return a single JSON object with the following keys. Do not add any other text o
         ]
 
         if args.verbose:
-            print(f"\n--- Prompt for slide {i+1} ---")
+            print(f"\n--- Prompt for slide {k+1} ---")
             print(user_prompt)
 
         # 4. Call LLM
@@ -522,7 +554,7 @@ Return a single JSON object with the following keys. Do not add any other text o
             except Exception as e_first:
                 # One more attempt with explicit instruction to emit strict JSON
                 if args.verbose:
-                    print(f"Retrying slide {i+1} after parse/generation failure: {e_first}")
+                    print(f"Retrying slide {k+1} after parse/generation failure: {e_first}")
                 slide_content = await _generate_slide(
                     "Your previous output was invalid or not strictly JSON. Return ONLY a valid JSON object with the required keys (Title, WhyThisSlide, BridgeFromPrevious, Content, Audio, BridgeToNext, NewInsightAboutFigures, Figures). Do not include markdown fences."
                 )
@@ -542,12 +574,12 @@ Return a single JSON object with the following keys. Do not add any other text o
                 slide_content["NewInsightAboutFigures"] = False
 
             # Enforce unique titles by appending a suffix if necessary
-            title = slide_content.get("Title") or f"Slide {i+1}"
+            title = slide_content.get("Title") or f"Slide {k+1}"
             if title in seen_titles:
-                candidate = f"{title} (Slide {i+1})"
+                candidate = f"{title} (Slide {k+1})"
                 suffix = 2
                 while candidate in seen_titles:
-                    candidate = f"{title} (Slide {i+1}-{suffix})"
+                    candidate = f"{title} (Slide {k+1}-{suffix})"
                     suffix += 1
                 title = candidate
                 slide_content["Title"] = title
@@ -571,12 +603,12 @@ Return a single JSON object with the following keys. Do not add any other text o
             if args.verbose:
                 print(f"Successfully generated content for: {slide_content.get('Title')}")
         except Exception as e:
-            print(f"Error generating slide {i+1}: {e}")
+            print(f"Error generating slide {k+1}: {e}")
             final_presentation.append({
                 "Title": "Error",
                 "WhyThisSlide": "",
                 "BridgeFromPrevious": "",
-                "Content": f"Failed to generate content for slide group: {slide_group.get('slide_titles')}",
+                "Content": f"Failed to generate content for slide group: {slide_group.get('slide_topics')}",
                 "Audio": str(e),
                 "BridgeToNext": "",
                 "NewInsightAboutFigures": False,

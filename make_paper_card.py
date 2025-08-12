@@ -223,6 +223,7 @@ async def main_async(args: argparse.Namespace):
     try:
         last_err: Optional[Exception] = None
         response_text = ""
+        card: Optional[dict] = None
         for model_to_try in models_to_try:
             try:
                 response = await client.create_chat_completion(
@@ -285,7 +286,8 @@ async def main_async(args: argparse.Namespace):
                 except Exception as e:
                     last_err = e
                     continue
-        else:
+        # If still no card after retries, fail
+        if card is None:
             raise RuntimeError(f"All card models failed. Last error: {last_err}")
     except Exception as e:
         raise RuntimeError(f"Failed to generate paper card: {e}")
